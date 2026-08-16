@@ -57,7 +57,7 @@ GITHUB_REPO="${2:-${DEFAULT_REPO}}"
 
 GITHUB_URL="https://github.com/${GITHUB_USER}/${GITHUB_REPO}.git"
 
-echo -e "\n${YELLOW}[1/4] 正在安装系统基础依赖...${PLAIN}"
+echo -e "\n${YELLOW}[1/5] 正在安装系统基础依赖...${PLAIN}"
 if [ "$PKG_MGR" = "apt-get" ]; then
     echo -e "  -> 正在运行 apt-get update 更新软件源清单..."
     apt-get update -q || true
@@ -92,7 +92,7 @@ if [ -d "${INSTALL_DIR}/.git" ]; then
 fi
 DEPLOY_BRANCH="${CURRENT_BRANCH:-$DEFAULT_DEPLOY_BRANCH}"
 
-echo -e "\n${YELLOW}[2/4] 正在从 GitHub 部署源代码到 ${INSTALL_DIR} (目标分支: ${DEPLOY_BRANCH})...${PLAIN}"
+echo -e "\n${YELLOW}[2/5] 正在从 GitHub 部署源代码到 ${INSTALL_DIR} (目标分支: ${DEPLOY_BRANCH})...${PLAIN}"
 if [ -f "${INSTALL_DIR}/.local_dev" ]; then
     echo -e "${GREEN}检测到本地开发模式 (.local_dev)，跳过 git pull/reset 保持本地修改。${PLAIN}"
 else
@@ -129,8 +129,21 @@ else
     fi
 fi
 
-# 5. Configure Service
-echo -e "\n${YELLOW}[3/4] 正在配置系统服务...${PLAIN}"
+# 5. Install sing-box from the vendored script before configuring the gateway services.
+echo -e "\n${YELLOW}[3/5] 正在安装 sing-box 协议入口...${PLAIN}"
+if [ ! -x /etc/sing-box/bin/sing-box ]; then
+    if [ ! -f "${INSTALL_DIR}/sing-box/install.sh" ]; then
+        echo -e "${YELLOW}  -> 本地 sing-box 目录缺失，正在获取受支持的管理脚本...${PLAIN}"
+        git clone --depth=1 https://github.com/233boy/sing-box.git "${INSTALL_DIR}/sing-box"
+    fi
+    echo -e "  -> 正在使用仓库内 sing-box 安装器部署核心..."
+    (cd "${INSTALL_DIR}/sing-box" && bash install.sh --local-install)
+else
+    echo -e "${GREEN}  -> 已检测到 sing-box 核心，保留现有安装。${PLAIN}"
+fi
+
+# 6. Configure Service
+echo -e "\n${YELLOW}[4/5] 正在配置系统服务...${PLAIN}"
 if command -v systemctl >/dev/null 2>&1; then
     echo -e "  -> 检测到 systemd，正在创建服务配置 /lib/systemd/system/aimilivpn.service ..."
     cat > /lib/systemd/system/aimilivpn.service <<EOF
@@ -174,8 +187,8 @@ else
     echo -e "${YELLOW}警告: 未能检测到 systemd 或 OpenRC，请手动管理服务。${PLAIN}"
 fi
 
-# 6. Configure global command shortcut "ml"
-echo -e "\n${YELLOW}[4/4] 正在创建全局命令快捷接口 'ml'...${PLAIN}"
+# 7. Configure global command shortcut "ml"
+echo -e "\n${YELLOW}[5/5] 正在创建全局命令快捷接口 'ml'...${PLAIN}"
 echo -e "  -> 正在写入管理脚本 /usr/bin/ml ..."
 cat > /usr/bin/ml <<'EOF'
 #!/usr/bin/env python3
@@ -1069,6 +1082,50 @@ with open(auth_file, "w", encoding="utf-8") as f:
 PY
 fi
 
+# Replace the upstream script's direct outbound with the managed VPNGate SOCKS5 chain.
+echo -e "\n正在初始化 sing-box -> VPNGate 代理链配置..."
+python3 - "$INSTALL_DIR" "$AUTH_FILE" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+install_dir = Path(sys.argv[1])
+auth_file = Path(sys.argv[2])
+sys.path.insert(0, str(install_dir))
+
+import singbox_manager
+
+try:
+    config = json.loads(auth_file.read_text(encoding="utf-8")) if auth_file.exists() else {}
+    proxy_port = int(config.get("proxy_port", 7928))
+    ui_port = int(config.get("port", 8787))
+    existing = config.get("singbox") if isinstance(config.get("singbox"), dict) else {}
+    settings = singbox_manager.default_settings(proxy_port)
+    settings.update(existing)
+    settings["upstream_host"] = "127.0.0.1"
+    settings["upstream_port"] = proxy_port
+
+    if not settings.get("uuid"):
+        settings.update(singbox_manager.generate_values("uuid"))
+    if not settings.get("short_id"):
+        settings.update(singbox_manager.generate_values("short_id"))
+    if not settings.get("private_key") or not settings.get("public_key"):
+        settings.update(singbox_manager.generate_values("reality_keypair"))
+
+    settings["enabled"] = True
+    settings["chain_enabled"] = True
+    saved = singbox_manager.save_config(settings, proxy_port, {ui_port, proxy_port})
+    config["singbox"] = saved
+    temp_file = auth_file.with_suffix(".tmp")
+    temp_file.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
+    temp_file.chmod(0o600)
+    temp_file.replace(auth_file)
+    print(f"  -> sing-box 已配置为 SOCKS5 127.0.0.1:{proxy_port} -> VPNGate tun0 出口")
+except Exception as exc:
+    print(f"  -> sing-box 代理链初始化失败: {exc}", file=sys.stderr)
+    raise SystemExit(1)
+PY
+
 # 8. Start service
 # 8.5 Optimize network parameters (rp_filter for policy routing)
 echo -e "\n正在优化网络参数 (配置反向路径过滤 rp_filter=2 以支持策略路由)..."
@@ -1103,8 +1160,10 @@ fi
 echo -e "\n正在启动 AimiliVPN 服务并初始化网络..."
 if command -v systemctl >/dev/null 2>&1; then
     systemctl restart aimilivpn.service || true
+    systemctl restart sing-box.service || true
 elif command -v rc-service >/dev/null 2>&1; then
     rc-service aimilivpn restart || true
+    rc-service sing-box restart || true
 fi
 
 # Wait and poll for node loading and active connection

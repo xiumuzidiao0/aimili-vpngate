@@ -7,7 +7,7 @@ Bilingual: [中文](#中文) | [English](#english)
 <a name="中文"></a>
 ## 中文 (Chinese)
 
-AimiliVPN 是一款基于官方 VPNGate 开放协议的高性能、零依赖 VPN 代理网关。它以纯 Python 标准库编写，内置美观响应式的管理网页，提供智能并发测速、多路由模式、出站代理网关、实时日志等强大功能。
+AimiliVPN 是一款基于官方 VPNGate 开放协议的高性能 VPN 代理网关。它提供节点测速、自动切换和 Web 管理，并集成 sing-box 协议入口：外部客户端可通过 VLESS-REALITY 接入，流量固定经由本机 SOCKS5、OpenVPN `tun0` 和当前 VPNGate 节点出站。
 
 ---
 
@@ -59,6 +59,16 @@ bash <(curl -Ls https://raw.githubusercontent.com/baoweise-bot/aimili-vpngate/ma
 
 #### 第三步：使用本机代理 (核心步骤)
 为了防止代理端口暴露至公网被恶意扫描和滥用，AimiliVPN 的双效代理服务（默认端口 **`7928`**，自适应支持 SOCKS5 和 HTTP 协议）**默认仅绑定在本地回环地址（`127.0.0.1`）**，只接收 VPS 本机上的流量，不对外机提供代理。
+
+### 🔗 sing-box 代理链
+
+安装脚本会一并部署 sing-box。登录 Web UI 后，打开“管理员 -> sing-box 代理链”，即可安装/检查服务、生成 VLESS-REALITY 凭据、设置公网入口端口和客户端服务器地址。链路固定为：
+
+```text
+VLESS-REALITY 客户端 -> sing-box -> 127.0.0.1:7928 -> OpenVPN tun0 -> VPNGate 节点
+```
+
+`7928` 是内部跳点，不需要也不应当在防火墙或安全组中对公网放行；只放行 Web UI 端口和在 sing-box 面板中设置的公网入口端口。VPNGate 节点自动切换后，客户端连接参数保持不变。
 
 * **🐍 Python 脚本中使用代理**:
   ```python
@@ -137,7 +147,7 @@ bash <(curl -Ls https://raw.githubusercontent.com/baoweise-bot/aimili-vpngate/ma
 <a name="english"></a>
 ## English
 
-AimiliVPN is a high-performance, zero-dependency VPN proxy gateway built entirely using Python's standard library. It parses official VPNGate servers, benchmarks latency, and routes traffic through a built-in dual-protocol (HTTP/SOCKS5) proxy server.
+AimiliVPN is a VPNGate proxy gateway with node benchmarking, automatic switching, a Web UI, and an integrated sing-box protocol entrypoint. External clients can use VLESS-REALITY while all egress remains pinned to the local SOCKS5 gateway, OpenVPN `tun0`, and the active VPNGate node.
 
 ### 🌟 Recommended VPS Deals
 [![BandwagonHost Premium Optimized Routes](https://img.shields.io/badge/BandwagonHost-Premium%20Optimized%20Routes-red?style=for-the-badge)](https://bandwagonhost.com/aff.php?aff=81790)
@@ -182,6 +192,16 @@ Open your browser and navigate to the printed URL (e.g. `http://your_vps_ip:8787
 
 #### Step 3: Use Localhost Proxy (Core Step)
 To prevent unauthorized scanning and abuse of the proxy port on the public internet, the built-in HTTP/SOCKS5 proxy server (default port **`7928`**) **binds to localhost (`127.0.0.1`) by default**. It is designed to route traffic generated locally on the VPS, rather than acting as a public proxy server.
+
+### 🔗 sing-box Proxy Chain
+
+The installer also deploys sing-box. In the Web UI, open `Admin -> sing-box Proxy Chain` to install/check the service, generate VLESS-REALITY credentials, choose the public inbound port, and set the client-facing hostname.
+
+```text
+VLESS-REALITY client -> sing-box -> 127.0.0.1:7928 -> OpenVPN tun0 -> VPNGate node
+```
+
+Port `7928` is an internal hop and should not be opened to the public internet. Only allow the Web UI port and the public sing-box inbound port in the firewall/security group. VPNGate node changes do not require any client configuration changes.
 
 * **🐍 Proxy in Python**:
   ```python

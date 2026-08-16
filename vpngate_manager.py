@@ -77,6 +77,7 @@ class DualStackHTTPServer(ThreadingHTTPServer):
 
 import vpn_utils
 import proxy_server
+import singbox_manager
 
 def env_int(name: str, default: int, min_value: int | None = None, max_value: int | None = None) -> int:
     raw = os.environ.get(name)
@@ -227,7 +228,26 @@ def load_ui_config() -> dict[str, Any]:
             "connection_enabled": True,
             "fixed_node_id": "",
             "favorite_node_ids": [],
-            "fav_fail_fallback": False
+            "fav_fail_fallback": False,
+            "singbox": {
+                "enabled": False,
+                "chain_enabled": False,
+                "protocol": "vless-reality",
+                "listen": "0.0.0.0",
+                "port": 4433,
+                "uuid": "",
+                "server_name": "www.cloudflare.com",
+                "short_id": "",
+                "private_key": "",
+                "public_key": "",
+                "public_host": "",
+                "upstream_host": "127.0.0.1",
+                "upstream_port": LOCAL_PROXY_PORT,
+                "upstream_username": "",
+                "upstream_password": "",
+                "last_apply_at": 0,
+                "last_error": ""
+            }
         }
         updated = False
         if auth_file.exists():
@@ -235,7 +255,7 @@ def load_ui_config() -> dict[str, Any]:
                 data = json.loads(auth_file.read_text(encoding="utf-8"))
                 for key, val in data.items():
                     config[key] = val
-                for key in ["host", "port", "proxy_port", "routing_mode", "force_country", "routing_ip_type", "connection_enabled", "fixed_node_id", "favorite_node_ids", "fav_fail_fallback"]:
+                for key in ["host", "port", "proxy_port", "routing_mode", "force_country", "routing_ip_type", "connection_enabled", "fixed_node_id", "favorite_node_ids", "fav_fail_fallback", "singbox"]:
                     if key not in data:
                         updated = True
             except Exception:
@@ -262,6 +282,20 @@ def load_ui_config() -> dict[str, Any]:
             normalized_proxy_port = fallback_proxy_port
         if normalized_proxy_port != config.get("proxy_port"):
             config["proxy_port"] = normalized_proxy_port
+            updated = True
+
+        if not isinstance(config.get("singbox"), dict):
+            config["singbox"] = {}
+            updated = True
+        default_singbox = singbox_manager.default_settings(normalized_proxy_port)
+        default_singbox["enabled"] = False
+        default_singbox["chain_enabled"] = False
+        for key, value in default_singbox.items():
+            if key not in config["singbox"]:
+                config["singbox"][key] = value
+                updated = True
+        if config["singbox"].get("upstream_port") != normalized_proxy_port:
+            config["singbox"]["upstream_port"] = normalized_proxy_port
             updated = True
             
         if not auth_file.exists() or updated:
@@ -380,8 +414,55 @@ def get_state() -> dict[str, Any]:
     state["fixed_node_id"] = ui_cfg.get("fixed_node_id", "")
     state["favorite_node_ids"] = ui_cfg.get("favorite_node_ids", [])
     state["fav_fail_fallback"] = False
+    state["singbox"] = singbox_manager.redact_settings(ui_cfg.get("singbox", {}))
     
     return state
+
+def save_ui_config(ui_cfg: dict[str, Any]) -> None:
+    auth_file = DATA_DIR / "ui_auth.json"
+    with lock:
+        DATA_DIR.mkdir(exist_ok=True, parents=True)
+        write_json(auth_file, ui_cfg)
+
+def current_singbox_settings(ui_cfg: dict[str, Any] | None = None) -> dict[str, Any]:
+    ui_cfg = ui_cfg or load_ui_config()
+    settings = ui_cfg.get("singbox", {})
+    if not isinstance(settings, dict):
+        settings = {}
+    defaults = singbox_manager.default_settings(bounded_int(ui_cfg.get("proxy_port"), LOCAL_PROXY_PORT, 1024, 65535))
+    defaults["enabled"] = False
+    defaults["chain_enabled"] = False
+    defaults.update(settings)
+    return defaults
+
+def singbox_api_status(ui_cfg: dict[str, Any] | None = None) -> dict[str, Any]:
+    ui_cfg = ui_cfg or load_ui_config()
+    settings = current_singbox_settings(ui_cfg)
+    try:
+        runtime = singbox_manager.status()
+    except Exception as exc:
+        runtime = {
+            "installed": singbox_manager.installed(),
+            "running": False,
+            "service_manager": "unknown",
+            "service_detail": "",
+            "config_exists": False,
+            "config_error": str(exc),
+            "settings": {},
+        }
+    chain_ready = bool(
+        settings.get("enabled")
+        and settings.get("chain_enabled")
+        and runtime.get("running")
+        and active_openvpn_running()
+    )
+    runtime["chain_ready"] = chain_ready
+    runtime["chain_error"] = "" if chain_ready else (
+        "代理链未启用" if not settings.get("enabled") or not settings.get("chain_enabled")
+        else "等待 sing-box 服务或 VPNGate OpenVPN 出口就绪"
+    )
+    runtime["settings"] = singbox_manager.redact_settings(settings)
+    return runtime
 
 def safe_name(value: str) -> str:
     value = re.sub(r"[^A-Za-z0-9_.-]+", "_", value.strip())
@@ -3184,6 +3265,10 @@ INDEX_HTML = r"""<!doctype html>
           <svg xmlns="http://www.w3.org/2000/svg" style="width:14px; height:14px;" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" /><path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" /></svg>
           代理设置
         </a>
+        <a href="javascript:void(0)" onclick="openSingboxModal()">
+          <svg xmlns="http://www.w3.org/2000/svg" style="width:14px; height:14px;" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 7h16M4 12h16M4 17h10" /></svg>
+          sing-box 代理链
+        </a>
         <a href="javascript:void(0)" onclick="openGatewayModal()">
           <svg xmlns="http://www.w3.org/2000/svg" style="width:14px; height:14px;" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" /></svg>
           网关设置
@@ -3417,6 +3502,55 @@ INDEX_HTML = r"""<!doctype html>
     </div>
   </div>
 
+
+  <!-- sing-box proxy chain modal -->
+  <div id="singbox_modal" class="modal">
+    <div class="modal-content" style="max-width: 640px; width: 94%; max-height: 88vh; overflow-y: auto;">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:18px;">
+        <div><h3 style="margin:0;font-size:18px;color:var(--text-primary);">sing-box 代理链</h3><div id="singbox_runtime_status" style="font-size:12px;color:var(--text-secondary);margin-top:5px;">正在读取服务状态...</div></div>
+        <button type="button" onclick="closeSingboxModal()" title="关闭" style="background:transparent;border:none;padding:4px;cursor:pointer;color:var(--text-secondary);width:28px;height:28px;">&#10005;</button>
+      </div>
+      <div id="singbox_error" style="color:var(--danger);font-size:13px;margin-bottom:12px;padding:8px 12px;background:rgba(244,63,94,0.1);border:1px solid rgba(244,63,94,0.2);border-radius:6px;display:none;"></div>
+      <div id="singbox_success" style="color:var(--success);font-size:13px;margin-bottom:12px;padding:8px 12px;background:rgba(16,185,129,0.1);border:1px solid rgba(16,185,129,0.2);border-radius:6px;display:none;"></div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px;">
+        <button type="button" class="connect-btn" onclick="singboxAction('install')">安装 sing-box</button>
+        <button type="button" class="connect-btn" onclick="singboxAction('start')">启动</button>
+        <button type="button" class="connect-btn" onclick="singboxAction('stop')">停止</button>
+        <button type="button" class="connect-btn" onclick="singboxAction('restart')">重启</button>
+        <button type="button" class="test-btn" onclick="singboxAction('validate')">校验配置</button>
+      </div>
+      <form id="singbox_form" onsubmit="saveSingboxConfig(event)">
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin-bottom:16px;">
+          <label class="form-label" style="display:flex;align-items:center;gap:8px;margin:0;"><input id="sb_enabled" type="checkbox"> 启用 sing-box 入口</label>
+          <label class="form-label" style="display:flex;align-items:center;gap:8px;margin:0;"><input id="sb_chain_enabled" type="checkbox"> 启用 VPNGate 代理链</label>
+        </div>
+        <div class="form-group" style="margin-bottom:12px;"><label class="form-label" for="sb_protocol">入口协议</label><select id="sb_protocol" class="input-field"><option value="vless-reality">VLESS-REALITY</option></select></div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+          <div class="form-group" style="margin-bottom:12px;"><label class="form-label" for="sb_listen">公网监听地址</label><select id="sb_listen" class="input-field"><option value="0.0.0.0">IPv4 (0.0.0.0)</option><option value="::">IPv4 + IPv6 (::)</option></select></div>
+          <div class="form-group" style="margin-bottom:12px;"><label class="form-label" for="sb_port">公网入口端口</label><input id="sb_port" type="number" class="input-field" min="1" max="65535" required></div>
+        </div>
+        <div class="form-group" style="margin-bottom:12px;"><label class="form-label" for="sb_public_host">客户端服务器地址或域名</label><input id="sb_public_host" type="text" class="input-field" placeholder="例如 vps.example.com 或服务器公网 IP"></div>
+        <div style="border-top:1px dashed rgba(255,255,255,0.08);padding-top:14px;margin-top:6px;">
+          <div style="font-size:13px;color:var(--text-primary);font-weight:600;margin-bottom:12px;">VLESS-REALITY 凭据</div>
+          <div class="form-group" style="margin-bottom:12px;"><label class="form-label" for="sb_uuid">UUID</label><div style="display:flex;gap:8px;"><input id="sb_uuid" type="text" class="input-field" required><button type="button" class="connect-btn" onclick="regenerateSingbox('uuid')">生成</button></div></div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+            <div class="form-group" style="margin-bottom:12px;"><label class="form-label" for="sb_server_name">Reality SNI</label><input id="sb_server_name" type="text" class="input-field" required></div>
+            <div class="form-group" style="margin-bottom:12px;"><label class="form-label" for="sb_short_id">Reality short ID</label><div style="display:flex;gap:8px;"><input id="sb_short_id" type="text" class="input-field" required><button type="button" class="connect-btn" onclick="regenerateSingbox('short_id')">生成</button></div></div>
+          </div>
+          <div class="form-group" style="margin-bottom:12px;"><label class="form-label" for="sb_private_key">Reality 私钥</label><div style="display:flex;gap:8px;"><input id="sb_private_key" type="password" class="input-field" placeholder="安装后点击生成"><button type="button" class="connect-btn" onclick="regenerateSingbox('reality_keypair')">生成密钥对</button></div></div>
+          <div class="form-group" style="margin-bottom:12px;"><label class="form-label" for="sb_public_key">Reality 公钥</label><input id="sb_public_key" type="text" class="input-field" readonly></div>
+        </div>
+        <div style="border-top:1px dashed rgba(255,255,255,0.08);padding-top:14px;margin-top:6px;">
+          <div style="font-size:13px;color:var(--text-primary);font-weight:600;margin-bottom:6px;">固定出站链路</div>
+          <div id="sb_upstream_display" class="mono" style="padding:10px 12px;background:rgba(255,255,255,0.03);border:1px solid var(--border-color);border-radius:6px;">SOCKS5 127.0.0.1:7928 -> tun0 -> VPNGate</div>
+          <div style="font-size:12px;color:var(--text-secondary);line-height:1.45;margin-top:8px;">出站固定指向 AimiliVPN 本地 SOCKS5，不允许 direct 回退；VPN 节点切换后客户端配置无需变更。</div>
+        </div>
+        <div class="form-group" style="margin:16px 0 10px;"><label class="form-label" for="sb_client_uri">客户端连接地址</label><textarea id="sb_client_uri" class="input-field" rows="3" readonly placeholder="保存配置并填写客户端服务器地址后生成"></textarea></div>
+        <button type="button" class="connect-btn" style="margin-bottom:16px;" onclick="loadSingboxClientInfo()">刷新客户端连接地址</button>
+        <div style="display:flex;gap:12px;justify-content:flex-end;"><button type="button" onclick="closeSingboxModal()" style="height:40px;padding:0 16px;font-weight:600;border-radius:8px;border:1px solid var(--border-color);background:transparent;color:var(--text-secondary);cursor:pointer;">取消</button><button type="submit" id="singbox_submit_btn" class="btn-primary" style="height:40px;padding:0 20px;font-weight:600;border-radius:8px;">保存并应用</button></div>
+      </form>
+    </div>
+  </div>
 
   <!-- VPS 购买推荐 Modal -->
   <div id="vps_recommend_modal" class="modal">
@@ -4630,6 +4764,152 @@ async function saveNetwork(e) {
 
 
 
+function setSingboxMessage(type, message) {
+  const errorEl = $("singbox_error");
+  const successEl = $("singbox_success");
+  errorEl.style.display = "none";
+  successEl.style.display = "none";
+  if (!message) return;
+  const target = type === "error" ? errorEl : successEl;
+  target.textContent = message;
+  target.style.display = "block";
+}
+
+function fillSingboxForm(settings) {
+  $("sb_enabled").checked = !!settings.enabled;
+  $("sb_chain_enabled").checked = !!settings.chain_enabled;
+  $("sb_protocol").value = settings.protocol || "vless-reality";
+  $("sb_listen").value = settings.listen || "0.0.0.0";
+  $("sb_port").value = settings.port || 4433;
+  $("sb_public_host").value = settings.public_host || "";
+  $("sb_uuid").value = settings.uuid || "";
+  $("sb_server_name").value = settings.server_name || "www.cloudflare.com";
+  $("sb_short_id").value = settings.short_id || "";
+  $("sb_private_key").value = "";
+  $("sb_public_key").value = settings.public_key || "";
+  const upstreamPort = settings.upstream_port || (state && state.proxy_port) || 7928;
+  $("sb_upstream_display").textContent = `SOCKS5 127.0.0.1:${upstreamPort} -> tun0 -> VPNGate`;
+}
+
+function renderSingboxRuntime(runtime) {
+  const statusEl = $("singbox_runtime_status");
+  if (!runtime.installed) {
+    statusEl.textContent = "未安装。安装后会自动生成 VLESS-REALITY -> VPNGate SOCKS5 配置。";
+    return;
+  }
+  const service = runtime.running ? "服务运行中" : "服务已停止";
+  const chain = runtime.chain_ready ? "代理链已就绪" : (runtime.chain_error || "代理链未就绪");
+  statusEl.textContent = `${service}；${chain}`;
+}
+
+async function openSingboxModal() {
+  setSingboxMessage("", "");
+  $("singbox_modal").style.display = "flex";
+  $("admin_dropdown").style.display = "none";
+  try {
+    const [configRes, statusRes] = await Promise.all([fetch("./api/singbox/config"), fetch("./api/singbox/status")]);
+    const configData = await configRes.json();
+    const statusData = await statusRes.json();
+    if (!configRes.ok || !configData.ok) throw new Error(configData.error || "读取 sing-box 配置失败");
+    fillSingboxForm(configData.settings || {});
+    if (statusRes.ok && statusData.ok) renderSingboxRuntime(statusData.data || {});
+  } catch (err) {
+    setSingboxMessage("error", err.message || "读取 sing-box 状态失败");
+  }
+}
+
+function closeSingboxModal() {
+  $("singbox_modal").style.display = "none";
+}
+
+async function singboxAction(action) {
+  setSingboxMessage("", "");
+  const submit = $("singbox_submit_btn");
+  submit.disabled = true;
+  try {
+    const res = await fetch("./api/singbox/action", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action }) });
+    const data = await res.json();
+    if (!res.ok || !data.ok) throw new Error(data.error || "sing-box 操作失败");
+    setSingboxMessage("success", data.message || "sing-box 服务操作成功");
+    if (action === "install") await openSingboxModal();
+    await load();
+  } catch (err) {
+    setSingboxMessage("error", err.message || "sing-box 操作失败");
+  } finally {
+    submit.disabled = false;
+  }
+}
+
+async function regenerateSingbox(kind) {
+  setSingboxMessage("", "");
+  try {
+    const res = await fetch("./api/singbox/regenerate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ kind }) });
+    const data = await res.json();
+    if (!res.ok || !data.ok) throw new Error(data.error || "生成凭据失败");
+    const values = data.values || {};
+    if (values.uuid) $("sb_uuid").value = values.uuid;
+    if (values.short_id) $("sb_short_id").value = values.short_id;
+    if (values.private_key) $("sb_private_key").value = values.private_key;
+    if (values.public_key) $("sb_public_key").value = values.public_key;
+    setSingboxMessage("success", "新凭据已生成，保存后生效。");
+  } catch (err) {
+    setSingboxMessage("error", err.message || "生成凭据失败");
+  }
+}
+
+async function saveSingboxConfig(event) {
+  event.preventDefault();
+  setSingboxMessage("", "");
+  const submit = $("singbox_submit_btn");
+  const port = parseInt($("sb_port").value, 10);
+  if (Number.isNaN(port) || port < 1 || port > 65535) {
+    setSingboxMessage("error", "公网入口端口必须在 1 至 65535 之间");
+    return;
+  }
+  const settings = {
+    enabled: $("sb_enabled").checked,
+    chain_enabled: $("sb_chain_enabled").checked,
+    protocol: $("sb_protocol").value,
+    listen: $("sb_listen").value,
+    port,
+    public_host: $("sb_public_host").value.trim(),
+    uuid: $("sb_uuid").value.trim(),
+    server_name: $("sb_server_name").value.trim(),
+    short_id: $("sb_short_id").value.trim(),
+    public_key: $("sb_public_key").value.trim()
+  };
+  const privateKey = $("sb_private_key").value.trim();
+  if (privateKey) settings.private_key = privateKey;
+  submit.disabled = true;
+  submit.textContent = "正在校验并应用...";
+  try {
+    const res = await fetch("./api/singbox/config", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ settings, apply: true }) });
+    const data = await res.json();
+    if (!res.ok || !data.ok) throw new Error(data.error || "保存 sing-box 配置失败");
+    fillSingboxForm(data.settings || settings);
+    setSingboxMessage("success", data.message || "配置已应用");
+    await loadSingboxClientInfo();
+    await load();
+  } catch (err) {
+    setSingboxMessage("error", err.message || "保存 sing-box 配置失败");
+  } finally {
+    submit.disabled = false;
+    submit.textContent = "保存并应用";
+  }
+}
+
+async function loadSingboxClientInfo() {
+  try {
+    const res = await fetch("./api/singbox/client_info");
+    const data = await res.json();
+    if (!res.ok || !data.ok) throw new Error(data.error || "客户端连接地址不可用");
+    $("sb_client_uri").value = data.data.uri || "";
+  } catch (err) {
+    $("sb_client_uri").value = "";
+    setSingboxMessage("error", err.message || "客户端连接地址不可用");
+  }
+}
+
 function openVpsModal() {
   $("vps_recommend_modal").style.display = "flex";
 }
@@ -5195,6 +5475,20 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_bytes(node["config_text"].encode("utf-8"), "application/x-openvpn-profile")
             else:
                 self.send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
+        elif effective_path == "/api/singbox/status":
+            self.send_json({"ok": True, "data": singbox_api_status()})
+        elif effective_path == "/api/singbox/config":
+            self.send_json({"ok": True, "settings": singbox_manager.redact_settings(current_singbox_settings())})
+        elif effective_path == "/api/singbox/client_info":
+            try:
+                self.send_json({"ok": True, "data": singbox_manager.client_info(current_singbox_settings())})
+            except Exception as exc:
+                self.send_json({"ok": False, "error": str(exc)}, HTTPStatus.BAD_REQUEST)
+        elif effective_path == "/api/singbox/logs":
+            try:
+                self.send_json({"ok": True, "logs": singbox_manager.recent_logs()})
+            except Exception as exc:
+                self.send_json({"ok": False, "error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
         elif effective_path == "/api/gateway_status":
             web_ui_status = {
                 "name": "Web 管理服务",
@@ -5281,12 +5575,31 @@ class Handler(BaseHTTPRequestHandler):
                 "details": f"上次心跳: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(last_pinger_heartbeat)) if last_pinger_heartbeat > 0 else '等待启动'}",
                 "error": "" if pinger_ok else "线程可能已中止，无法实时刷新活动节点的 Ping 延迟。"
             }
+            singbox_runtime = singbox_api_status()
+            singbox_status = {
+                "name": "sing-box 协议入口",
+                "status": "running" if singbox_runtime.get("running") else "stopped",
+                "details": (
+                    f"{singbox_runtime['settings'].get('protocol', 'vless-reality')} "
+                    f"{singbox_runtime['settings'].get('listen', '0.0.0.0')}:{singbox_runtime['settings'].get('port', '-') }"
+                    if singbox_runtime.get("installed") else "尚未安装"
+                ),
+                "error": singbox_runtime.get("config_error", "")
+            }
+            proxy_chain_status = {
+                "name": "sing-box -> VPNGate 代理链",
+                "status": "running" if singbox_runtime.get("chain_ready") else "stopped",
+                "details": f"SOCKS5 127.0.0.1:{LOCAL_PROXY_PORT} -> tun0",
+                "error": singbox_runtime.get("chain_error", "")
+            }
             self.send_json({
                 "ok": True,
                 "services": [
                     web_ui_status,
                     proxy_gateway_status,
                     openvpn_status,
+                    singbox_status,
+                    proxy_chain_status,
                     collector_status,
                     checker_status,
                     pinger_status
@@ -5379,6 +5692,107 @@ class Handler(BaseHTTPRequestHandler):
 
         if not self.is_authorized():
             self.send_json({"error": "Unauthorized"}, HTTPStatus.UNAUTHORIZED)
+            return
+
+        if effective_path == "/api/singbox/config":
+            try:
+                payload = self.read_json_body()
+                incoming = payload.get("settings", payload)
+                if not isinstance(incoming, dict):
+                    raise ValueError("代理链设置必须是对象")
+                allowed_fields = {
+                    "enabled", "chain_enabled", "protocol", "listen", "port", "uuid", "server_name",
+                    "short_id", "private_key", "public_key", "public_host", "upstream_host",
+                    "upstream_port", "upstream_username", "upstream_password"
+                }
+                settings = current_singbox_settings()
+                settings.update({key: value for key, value in incoming.items() if key in allowed_fields})
+                ui_cfg = load_ui_config()
+                proxy_port = bounded_int(ui_cfg.get("proxy_port"), LOCAL_PROXY_PORT, 1024, 65535)
+                settings["upstream_host"] = "127.0.0.1"
+                settings["upstream_port"] = proxy_port
+                forbidden_ports = {bounded_int(ui_cfg.get("port"), UI_PORT, 1, 65535), proxy_port}
+                saved = singbox_manager.save_config(settings, proxy_port, forbidden_ports)
+                ui_cfg["singbox"] = saved
+                save_ui_config(ui_cfg)
+
+                action_result = None
+                if payload.get("apply", True):
+                    if saved["enabled"] and saved["chain_enabled"]:
+                        action_result = singbox_manager.service_action("reload")
+                    else:
+                        action_result = singbox_manager.service_action("stop")
+                self.send_json({
+                    "ok": True,
+                    "message": "sing-box 代理链配置已保存" + ("并已应用" if action_result else ""),
+                    "settings": singbox_manager.redact_settings(saved),
+                    "status": action_result,
+                })
+            except (ValueError, singbox_manager.SingBoxError) as exc:
+                self.send_json({"ok": False, "error": str(exc)}, HTTPStatus.BAD_REQUEST)
+            except Exception as exc:
+                log_to_json("ERROR", "SingBox", f"保存代理链配置失败: {exc}")
+                self.send_json({"ok": False, "error": "保存 sing-box 代理链配置失败"}, HTTPStatus.INTERNAL_SERVER_ERROR)
+            return
+
+        if effective_path == "/api/singbox/regenerate":
+            try:
+                payload = self.read_json_body()
+                kind = str(payload.get("kind") or "").strip()
+                values = singbox_manager.generate_values(kind)
+                self.send_json({"ok": True, "values": values})
+            except singbox_manager.SingBoxError as exc:
+                self.send_json({"ok": False, "error": str(exc)}, HTTPStatus.BAD_REQUEST)
+            except Exception:
+                self.send_json({"ok": False, "error": "生成 sing-box 凭据失败"}, HTTPStatus.INTERNAL_SERVER_ERROR)
+            return
+
+        if effective_path == "/api/singbox/action":
+            try:
+                payload = self.read_json_body()
+                action = str(payload.get("action") or "").strip().lower()
+                if action == "install":
+                    singbox_manager.install()
+                    ui_cfg = load_ui_config()
+                    settings = current_singbox_settings(ui_cfg)
+                    if not settings.get("private_key") or not settings.get("public_key"):
+                        settings.update(singbox_manager.generate_values("reality_keypair"))
+                    if not settings.get("short_id"):
+                        settings.update(singbox_manager.generate_values("short_id"))
+                    if not settings.get("uuid"):
+                        settings.update(singbox_manager.generate_values("uuid"))
+                    settings["enabled"] = True
+                    settings["chain_enabled"] = True
+                    proxy_port = bounded_int(ui_cfg.get("proxy_port"), LOCAL_PROXY_PORT, 1024, 65535)
+                    settings["upstream_host"] = "127.0.0.1"
+                    settings["upstream_port"] = proxy_port
+                    saved = singbox_manager.save_config(
+                        settings,
+                        proxy_port,
+                        {bounded_int(ui_cfg.get("port"), UI_PORT, 1, 65535), proxy_port},
+                    )
+                    ui_cfg["singbox"] = saved
+                    save_ui_config(ui_cfg)
+                    result = singbox_manager.service_action("restart")
+                    self.send_json({"ok": True, "message": "sing-box 已安装并接入 VPNGate 代理链", "status": result})
+                elif action == "validate":
+                    ui_cfg = load_ui_config()
+                    settings = current_singbox_settings(ui_cfg)
+                    proxy_port = bounded_int(ui_cfg.get("proxy_port"), LOCAL_PROXY_PORT, 1024, 65535)
+                    normalized = singbox_manager.normalize_settings(
+                        settings,
+                        proxy_port,
+                        {bounded_int(ui_cfg.get("port"), UI_PORT, 1, 65535), proxy_port},
+                    )
+                    singbox_manager.validate_config(singbox_manager.build_proxy_chain_config(normalized))
+                    self.send_json({"ok": True, "message": "sing-box 配置校验通过"})
+                else:
+                    self.send_json({"ok": True, "status": singbox_manager.service_action(action)})
+            except singbox_manager.SingBoxError as exc:
+                self.send_json({"ok": False, "error": str(exc)}, HTTPStatus.BAD_REQUEST)
+            except Exception as exc:
+                log_to_json("ERROR", "SingBox", f"sing-box 服务操作失败: {exc}")
+                self.send_json({"ok": False, "error": "sing-box 服务操作失败"}, HTTPStatus.INTERNAL_SERVER_ERROR)
             return
 
         if effective_path == "/api/update_credentials":
@@ -5478,6 +5892,21 @@ class Handler(BaseHTTPRequestHandler):
                 if routing_mode == "fixed_ip" and not fixed_node_id:
                     self.send_json({"ok": False, "error": "启用固定 IP 前，请先连接一个要锁定的节点"}, HTTPStatus.BAD_REQUEST)
                     return
+
+                if new_proxy_port_int != expected_proxy_port:
+                    singbox_settings = current_singbox_settings(ui_cfg)
+                    singbox_settings["upstream_port"] = new_proxy_port_int
+                    if singbox_settings.get("enabled") and singbox_settings.get("chain_enabled"):
+                        try:
+                            singbox_settings = singbox_manager.save_config(
+                                singbox_settings,
+                                new_proxy_port_int,
+                                {bounded_int(ui_cfg.get("port"), UI_PORT, 1, 65535), new_proxy_port_int},
+                            )
+                        except singbox_manager.SingBoxError as exc:
+                            self.send_json({"ok": False, "error": f"无法同步 sing-box 代理链: {exc}"}, HTTPStatus.BAD_REQUEST)
+                            return
+                    ui_cfg["singbox"] = singbox_settings
                 
                 ui_cfg["proxy_port"] = new_proxy_port_int
                 ui_cfg["routing_mode"] = routing_mode
@@ -5492,6 +5921,12 @@ class Handler(BaseHTTPRequestHandler):
                 with lock:
                     DATA_DIR.mkdir(exist_ok=True, parents=True)
                     write_json(auth_file, ui_cfg)
+
+                if new_proxy_port_int != expected_proxy_port and ui_cfg["singbox"].get("enabled") and ui_cfg["singbox"].get("chain_enabled"):
+                    try:
+                        singbox_manager.service_action("reload")
+                    except singbox_manager.SingBoxError as exc:
+                        log_to_json("WARNING", "SingBox", f"本地代理端口变更后重载 sing-box 失败: {exc}")
 
                 policy_message = enforce_active_node_allowed_by_routing(ui_cfg, "路由设置已更新")
                 
