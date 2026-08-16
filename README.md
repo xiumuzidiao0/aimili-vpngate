@@ -64,6 +64,8 @@ bash <(curl -Ls https://raw.githubusercontent.com/xiumuzidiao0/aimili-vpngate/ma
 
 安装脚本会一并部署 sing-box。登录 Web UI 后，打开“管理员 -> sing-box 代理链”，即可安装/检查服务、生成 VLESS-REALITY 凭据、设置公网入口端口和客户端服务器地址。链路固定为：
 
+当前 Web UI 可直接管理 VLESS-REALITY、VLESS、VMess、Trojan、Shadowsocks、SOCKS5 和 HTTP 入口；所有入口统一经由 AimiliVPN 本地 SOCKS5 和 VPNGate 出口。
+
 ```text
 VLESS-REALITY 客户端 -> sing-box -> 127.0.0.1:7928 -> OpenVPN tun0 -> VPNGate 节点
 ```
@@ -196,6 +198,8 @@ To prevent unauthorized scanning and abuse of the proxy port on the public inter
 ### 🔗 sing-box Proxy Chain
 
 The installer also deploys sing-box. In the Web UI, open `Admin -> sing-box Proxy Chain` to install/check the service, generate VLESS-REALITY credentials, choose the public inbound port, and set the client-facing hostname.
+
+The Web UI currently manages VLESS-REALITY, VLESS, VMess, Trojan, Shadowsocks, SOCKS5, and HTTP inbounds. Every inbound uses the AimiliVPN local SOCKS5 gateway and VPNGate egress.
 
 ```text
 VLESS-REALITY client -> sing-box -> 127.0.0.1:7928 -> OpenVPN tun0 -> VPNGate node

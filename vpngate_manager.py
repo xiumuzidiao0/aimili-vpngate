@@ -3524,13 +3524,13 @@ INDEX_HTML = r"""<!doctype html>
           <label class="form-label" style="display:flex;align-items:center;gap:8px;margin:0;"><input id="sb_enabled" type="checkbox"> 启用 sing-box 入口</label>
           <label class="form-label" style="display:flex;align-items:center;gap:8px;margin:0;"><input id="sb_chain_enabled" type="checkbox"> 启用 VPNGate 代理链</label>
         </div>
-        <div class="form-group" style="margin-bottom:12px;"><label class="form-label" for="sb_protocol">入口协议</label><select id="sb_protocol" class="input-field"><option value="vless-reality">VLESS-REALITY</option></select></div>
+        <div class="form-group" style="margin-bottom:12px;"><label class="form-label" for="sb_protocol">入口协议</label><select id="sb_protocol" class="input-field" onchange="toggleSingboxProtocolFields()"><option value="vless-reality">VLESS-REALITY</option><option value="vless">VLESS (TCP)</option><option value="vmess">VMess (TCP)</option><option value="trojan">Trojan (TCP)</option><option value="shadowsocks">Shadowsocks</option><option value="socks">SOCKS5</option><option value="http">HTTP</option></select></div>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
           <div class="form-group" style="margin-bottom:12px;"><label class="form-label" for="sb_listen">公网监听地址</label><select id="sb_listen" class="input-field"><option value="0.0.0.0">IPv4 (0.0.0.0)</option><option value="::">IPv4 + IPv6 (::)</option></select></div>
           <div class="form-group" style="margin-bottom:12px;"><label class="form-label" for="sb_port">公网入口端口</label><input id="sb_port" type="number" class="input-field" min="1" max="65535" required></div>
         </div>
         <div class="form-group" style="margin-bottom:12px;"><label class="form-label" for="sb_public_host">客户端服务器地址或域名</label><input id="sb_public_host" type="text" class="input-field" placeholder="例如 vps.example.com 或服务器公网 IP"></div>
-        <div style="border-top:1px dashed rgba(255,255,255,0.08);padding-top:14px;margin-top:6px;">
+        <div id="sb_reality_fields" style="border-top:1px dashed rgba(255,255,255,0.08);padding-top:14px;margin-top:6px;">
           <div style="font-size:13px;color:var(--text-primary);font-weight:600;margin-bottom:12px;">VLESS-REALITY 凭据</div>
           <div class="form-group" style="margin-bottom:12px;"><label class="form-label" for="sb_uuid">UUID</label><div style="display:flex;gap:8px;"><input id="sb_uuid" type="text" class="input-field" required><button type="button" class="connect-btn" onclick="regenerateSingbox('uuid')">生成</button></div></div>
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
@@ -3539,6 +3539,13 @@ INDEX_HTML = r"""<!doctype html>
           </div>
           <div class="form-group" style="margin-bottom:12px;"><label class="form-label" for="sb_private_key">Reality 私钥</label><div style="display:flex;gap:8px;"><input id="sb_private_key" type="password" class="input-field" placeholder="安装后点击生成"><button type="button" class="connect-btn" onclick="regenerateSingbox('reality_keypair')">生成密钥对</button></div></div>
           <div class="form-group" style="margin-bottom:12px;"><label class="form-label" for="sb_public_key">Reality 公钥</label><input id="sb_public_key" type="text" class="input-field" readonly></div>
+        </div>
+        <div id="sb_password_fields" style="border-top:1px dashed rgba(255,255,255,0.08);padding-top:14px;margin-top:6px;display:none;">
+          <div class="form-group" style="margin-bottom:12px;"><label class="form-label" for="sb_password">协议密码</label><div style="display:flex;gap:8px;"><input id="sb_password" type="password" class="input-field" placeholder="留空保留当前密码"><button type="button" class="connect-btn" onclick="regenerateSingbox('password')">生成</button></div></div>
+          <div id="sb_username_field" class="form-group" style="margin-bottom:12px;"><label class="form-label" for="sb_username">用户名</label><input id="sb_username" type="text" class="input-field" value="aimilivpn"></div>
+        </div>
+        <div id="sb_method_fields" style="border-top:1px dashed rgba(255,255,255,0.08);padding-top:14px;margin-top:6px;display:none;">
+          <div class="form-group" style="margin-bottom:12px;"><label class="form-label" for="sb_method">Shadowsocks 加密方式</label><select id="sb_method" class="input-field"><option value="chacha20-ietf-poly1305">chacha20-ietf-poly1305</option><option value="aes-128-gcm">aes-128-gcm</option><option value="aes-256-gcm">aes-256-gcm</option><option value="2022-blake3-aes-128-gcm">2022-blake3-aes-128-gcm</option><option value="2022-blake3-aes-256-gcm">2022-blake3-aes-256-gcm</option><option value="2022-blake3-chacha20-poly1305">2022-blake3-chacha20-poly1305</option></select></div>
         </div>
         <div style="border-top:1px dashed rgba(255,255,255,0.08);padding-top:14px;margin-top:6px;">
           <div style="font-size:13px;color:var(--text-primary);font-weight:600;margin-bottom:6px;">固定出站链路</div>
@@ -4787,8 +4794,25 @@ function fillSingboxForm(settings) {
   $("sb_short_id").value = settings.short_id || "";
   $("sb_private_key").value = "";
   $("sb_public_key").value = settings.public_key || "";
+  $("sb_password").value = "";
+  $("sb_username").value = settings.username || "aimilivpn";
+  $("sb_method").value = settings.method || "chacha20-ietf-poly1305";
+  toggleSingboxProtocolFields();
   const upstreamPort = settings.upstream_port || (state && state.proxy_port) || 7928;
   $("sb_upstream_display").textContent = `SOCKS5 127.0.0.1:${upstreamPort} -> tun0 -> VPNGate`;
+}
+
+function toggleSingboxProtocolFields() {
+  const protocol = $("sb_protocol").value;
+  const isReality = protocol === "vless-reality";
+  const needsUuid = ["vless-reality", "vless", "vmess"].includes(protocol);
+  $("sb_reality_fields").style.display = isReality ? "block" : "none";
+  $("sb_password_fields").style.display = ["trojan", "shadowsocks", "socks", "http"].includes(protocol) ? "block" : "none";
+  $("sb_method_fields").style.display = protocol === "shadowsocks" ? "block" : "none";
+  $("sb_username_field").style.display = ["socks", "http", "trojan"].includes(protocol) ? "block" : "none";
+  $("sb_uuid").required = needsUuid;
+  $("sb_server_name").required = isReality;
+  $("sb_short_id").required = isReality;
 }
 
 function renderSingboxRuntime(runtime) {
@@ -4849,6 +4873,7 @@ async function regenerateSingbox(kind) {
     const values = data.values || {};
     if (values.uuid) $("sb_uuid").value = values.uuid;
     if (values.short_id) $("sb_short_id").value = values.short_id;
+    if (values.password) $("sb_password").value = values.password;
     if (values.private_key) $("sb_private_key").value = values.private_key;
     if (values.public_key) $("sb_public_key").value = values.public_key;
     setSingboxMessage("success", "新凭据已生成，保存后生效。");
@@ -4876,10 +4901,14 @@ async function saveSingboxConfig(event) {
     uuid: $("sb_uuid").value.trim(),
     server_name: $("sb_server_name").value.trim(),
     short_id: $("sb_short_id").value.trim(),
-    public_key: $("sb_public_key").value.trim()
+    public_key: $("sb_public_key").value.trim(),
+    username: $("sb_username").value.trim(),
+    method: $("sb_method").value
   };
   const privateKey = $("sb_private_key").value.trim();
   if (privateKey) settings.private_key = privateKey;
+  const password = $("sb_password").value.trim();
+  if (password) settings.password = password;
   submit.disabled = true;
   submit.textContent = "正在校验并应用...";
   try {
@@ -5702,8 +5731,8 @@ class Handler(BaseHTTPRequestHandler):
                     raise ValueError("代理链设置必须是对象")
                 allowed_fields = {
                     "enabled", "chain_enabled", "protocol", "listen", "port", "uuid", "server_name",
-                    "short_id", "private_key", "public_key", "public_host", "upstream_host",
-                    "upstream_port", "upstream_username", "upstream_password"
+                    "short_id", "private_key", "public_key", "public_host", "password", "method", "username",
+                    "upstream_host", "upstream_port", "upstream_username", "upstream_password"
                 }
                 settings = current_singbox_settings()
                 settings.update({key: value for key, value in incoming.items() if key in allowed_fields})

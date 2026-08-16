@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import base64
 import os
 import re
 import secrets
@@ -11,6 +12,7 @@ import subprocess
 import tempfile
 import time
 import uuid
+import urllib.parse
 from pathlib import Path
 from typing import Any
 
@@ -23,7 +25,32 @@ SINGBOX_INSTALLER = Path(
 )
 SINGBOX_LOG = Path(os.environ.get("SINGBOX_LOG", "/var/log/sing-box/access.log"))
 SINGBOX_SERVICE = os.environ.get("SINGBOX_SERVICE", "sing-box")
-SUPPORTED_PROTOCOLS = {"vless-reality"}
+SUPPORTED_PROTOCOLS = {
+    "vless-reality",
+    "vless",
+    "vmess",
+    "trojan",
+    "shadowsocks",
+    "socks",
+    "http",
+}
+PROTOCOL_LABELS = {
+    "vless-reality": "VLESS-REALITY",
+    "vless": "VLESS (TCP)",
+    "vmess": "VMess (TCP)",
+    "trojan": "Trojan (TCP)",
+    "shadowsocks": "Shadowsocks",
+    "socks": "SOCKS5",
+    "http": "HTTP",
+}
+SS_METHODS = {
+    "aes-128-gcm",
+    "aes-256-gcm",
+    "chacha20-ietf-poly1305",
+    "2022-blake3-aes-128-gcm",
+    "2022-blake3-aes-256-gcm",
+    "2022-blake3-chacha20-poly1305",
+}
 SERVICE_ACTIONS = {"start", "stop", "restart", "reload"}
 LISTEN_HOSTS = {"0.0.0.0", "::"}
 SERVER_NAME_RE = re.compile(r"^(?=.{1,253}$)[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?$")
@@ -70,7 +97,8 @@ def service_action(action: str) -> dict[str, Any]:
         command_action = "reload-or-restart" if action == "reload" else action
         result = _run(["systemctl", command_action, SINGBOX_SERVICE], timeout=30)
     else:
-        result = _run(["rc-service", SINGBOX_SERVICE, action], timeout=30)
+        command_action = "restart" if action == "reload" else action
+        result = _run(["rc-service", SINGBOX_SERVICE, command_action], timeout=30)
     if result.returncode != 0:
         raise SingBoxError(_command_error(result, f"sing-box {action} 失败"))
     return status()
@@ -150,6 +178,8 @@ def generate_values(kind: str) -> dict[str, str]:
         return {"uuid": str(uuid.uuid4())}
     if kind == "short_id":
         return {"short_id": secrets.token_hex(8)}
+    if kind == "password":
+        return {"password": secrets.token_urlsafe(18)}
     if kind == "reality_keypair":
         private_key, public_key = _generate_reality_keys()
         return {"private_key": private_key, "public_key": public_key}
@@ -169,6 +199,9 @@ def default_settings(proxy_port: int) -> dict[str, Any]:
         "private_key": "",
         "public_key": "",
         "public_host": "",
+        "password": secrets.token_urlsafe(18),
+        "method": "chacha20-ietf-poly1305",
+        "username": "aimilivpn",
         "upstream_host": "127.0.0.1",
         "upstream_port": proxy_port,
         "upstream_username": "",
@@ -211,7 +244,7 @@ def normalize_settings(raw: dict[str, Any], proxy_port: int, forbidden_ports: se
 
     protocol = str(base["protocol"] or "").strip().lower()
     if protocol not in SUPPORTED_PROTOCOLS:
-        raise SingBoxError("当前仅支持 VLESS-REALITY 入口")
+        raise SingBoxError("不支持的 sing-box 入口协议")
     base["protocol"] = protocol
     base["enabled"] = _as_bool(base["enabled"], "启用 sing-box")
     base["chain_enabled"] = _as_bool(base["chain_enabled"], "启用代理链")
@@ -222,10 +255,11 @@ def normalize_settings(raw: dict[str, Any], proxy_port: int, forbidden_ports: se
     base["listen"] = listen
     base["port"] = _as_port(base["port"], "sing-box 入口端口", forbidden_ports)
 
-    try:
-        base["uuid"] = str(uuid.UUID(str(base["uuid"])))
-    except (ValueError, TypeError, AttributeError) as exc:
-        raise SingBoxError("VLESS UUID 格式无效") from exc
+    if protocol in {"vless-reality", "vless", "vmess"}:
+        try:
+            base["uuid"] = str(uuid.UUID(str(base["uuid"])))
+        except (ValueError, TypeError, AttributeError) as exc:
+            raise SingBoxError("VLESS/VMess UUID 格式无效") from exc
 
     base["server_name"] = _clean_server_name(base["server_name"], "Reality SNI")
     public_host = str(base["public_host"] or "").strip()
@@ -234,15 +268,22 @@ def normalize_settings(raw: dict[str, Any], proxy_port: int, forbidden_ports: se
     else:
         base["public_host"] = ""
 
-    short_id = str(base["short_id"] or "").strip().lower()
-    if not re.fullmatch(r"[0-9a-f]{2,16}", short_id) or len(short_id) % 2:
-        raise SingBoxError("Reality short ID 必须为 2 至 16 位的偶数长度十六进制字符串")
-    base["short_id"] = short_id
-
+    base["short_id"] = str(base["short_id"] or "").strip().lower()
     base["private_key"] = str(base["private_key"] or "").strip()
     base["public_key"] = str(base["public_key"] or "").strip()
-    if base["enabled"] and (not base["private_key"] or not base["public_key"]):
-        raise SingBoxError("Reality 密钥未生成，请先生成密钥对")
+    if protocol == "vless-reality":
+        if not re.fullmatch(r"[0-9a-f]{2,16}", base["short_id"]) or len(base["short_id"]) % 2:
+            raise SingBoxError("Reality short ID 必须为 2 至 16 位的偶数长度十六进制字符串")
+        if base["enabled"] and (not base["private_key"] or not base["public_key"]):
+            raise SingBoxError("Reality 密钥未生成，请先生成密钥对")
+
+    base["password"] = str(base.get("password") or "")
+    base["username"] = str(base.get("username") or "aimilivpn")
+    base["method"] = str(base.get("method") or "chacha20-ietf-poly1305").lower()
+    if protocol in {"trojan", "shadowsocks", "socks", "http"} and base["enabled"] and not base["password"]:
+        raise SingBoxError(f"{PROTOCOL_LABELS[protocol]} 密码不能为空")
+    if protocol == "shadowsocks" and base["method"] not in SS_METHODS:
+        raise SingBoxError("Shadowsocks 加密方式不受支持")
 
     if str(base["upstream_host"] or "") != "127.0.0.1":
         raise SingBoxError("代理链上游必须是本机 AimiliVPN SOCKS5 代理 127.0.0.1")
@@ -266,13 +307,16 @@ def build_proxy_chain_config(settings: dict[str, Any]) -> dict[str, Any]:
         socks_outbound["username"] = settings["upstream_username"]
         socks_outbound["password"] = settings["upstream_password"]
 
+    protocol = settings["protocol"]
     inbound: dict[str, Any] = {
-        "type": "vless",
-        "tag": "aimilivpn-vless-reality",
+        "type": "vless" if protocol == "vless-reality" else protocol,
+        "tag": f"aimilivpn-{protocol}",
         "listen": settings["listen"],
         "listen_port": settings["port"],
-        "users": [{"uuid": settings["uuid"], "flow": "xtls-rprx-vision"}],
-        "tls": {
+    }
+    if protocol == "vless-reality":
+        inbound["users"] = [{"uuid": settings["uuid"], "flow": "xtls-rprx-vision"}]
+        inbound["tls"] = {
             "enabled": True,
             "server_name": settings["server_name"],
             "reality": {
@@ -281,8 +325,18 @@ def build_proxy_chain_config(settings: dict[str, Any]) -> dict[str, Any]:
                 "private_key": settings["private_key"],
                 "short_id": [settings["short_id"]],
             },
-        },
-    }
+        }
+    elif protocol == "vless":
+        inbound["users"] = [{"uuid": settings["uuid"]}]
+    elif protocol == "vmess":
+        inbound["users"] = [{"uuid": settings["uuid"]}]
+    elif protocol == "trojan":
+        inbound["users"] = [{"name": settings["username"], "password": settings["password"]}]
+    elif protocol == "shadowsocks":
+        inbound["method"] = settings["method"]
+        inbound["password"] = settings["password"]
+    elif protocol in {"socks", "http"}:
+        inbound["users"] = [{"username": settings["username"], "password": settings["password"]}]
     return {
         "log": {"level": "warn", "timestamp": True},
         "inbounds": [inbound],
@@ -354,21 +408,24 @@ def extract_settings(config: dict[str, Any]) -> dict[str, Any]:
     outbounds = config.get("outbounds")
     if not isinstance(inbounds, list) or not isinstance(outbounds, list):
         raise SingBoxError("sing-box 配置不包含代理链")
-    inbound = next((item for item in inbounds if isinstance(item, dict) and item.get("tag") == "aimilivpn-vless-reality"), None)
+    inbound = next((item for item in inbounds if isinstance(item, dict) and str(item.get("tag", "")).startswith("aimilivpn-")), None)
     outbound = next((item for item in outbounds if isinstance(item, dict) and item.get("tag") == "vpngate-chain"), None)
     if not inbound or not outbound:
         raise SingBoxError("当前 sing-box 配置不是 AimiliVPN 管理的代理链")
+    protocol = str(inbound.get("type") or "")
+    protocol = "vless-reality" if protocol == "vless" and (inbound.get("tls") or {}).get("reality", {}).get("enabled") else protocol
     users = inbound.get("users") or [{}]
     tls = inbound.get("tls") or {}
     reality = tls.get("reality") or {}
     short_ids = reality.get("short_id") or [""]
+    first_user = users[0] if isinstance(users[0], dict) else {}
     return {
         "enabled": True,
         "chain_enabled": True,
-        "protocol": "vless-reality",
+        "protocol": protocol,
         "listen": inbound.get("listen", "0.0.0.0"),
         "port": inbound.get("listen_port", 4433),
-        "uuid": users[0].get("uuid", "") if isinstance(users[0], dict) else "",
+        "uuid": first_user.get("uuid", ""),
         "server_name": tls.get("server_name", ""),
         "short_id": short_ids[0] if isinstance(short_ids, list) and short_ids else "",
         "private_key": reality.get("private_key", ""),
@@ -378,12 +435,15 @@ def extract_settings(config: dict[str, Any]) -> dict[str, Any]:
         "upstream_port": outbound.get("server_port", 7928),
         "upstream_username": outbound.get("username", ""),
         "upstream_password": outbound.get("password", ""),
+        "password": inbound.get("password", first_user.get("password", "")),
+        "method": inbound.get("method", "chacha20-ietf-poly1305"),
+        "username": first_user.get("username", first_user.get("name", "aimilivpn")),
     }
 
 
 def redact_settings(settings: dict[str, Any]) -> dict[str, Any]:
     redacted = settings.copy()
-    for key in ("private_key", "upstream_password"):
+    for key in ("private_key", "upstream_password", "password"):
         if redacted.get(key):
             redacted[key] = "***"
     return redacted
@@ -393,17 +453,35 @@ def client_info(settings: dict[str, Any]) -> dict[str, str]:
     host = str(settings.get("public_host") or "").strip()
     if not host:
         raise SingBoxError("请先设置客户端服务器地址或域名")
-    if not settings.get("public_key"):
-        raise SingBoxError("缺少 Reality 公钥，请重新生成密钥对后保存")
-    label = "AimiliVPN-VLESS-Reality"
-    query = (
-        f"encryption=none&security=reality&sni={settings['server_name']}&fp=chrome"
-        f"&pbk={settings['public_key']}&sid={settings['short_id']}&type=tcp&flow=xtls-rprx-vision"
-    )
-    return {
-        "protocol": "vless-reality",
-        "uri": f"vless://{settings['uuid']}@{host}:{settings['port']}?{query}#{label}",
-    }
+    protocol = settings.get("protocol", "vless-reality")
+    label = "AimiliVPN-" + PROTOCOL_LABELS.get(protocol, protocol)
+    host_part = f"[{host}]" if ":" in host and not host.startswith("[") else host
+    if protocol == "vless-reality":
+        if not settings.get("public_key"):
+            raise SingBoxError("缺少 Reality 公钥，请重新生成密钥对后保存")
+        query = (
+            f"encryption=none&security=reality&sni={urllib.parse.quote(settings['server_name'])}&fp=chrome"
+            f"&pbk={urllib.parse.quote(settings['public_key'])}&sid={settings['short_id']}&type=tcp&flow=xtls-rprx-vision"
+        )
+        uri = f"vless://{settings['uuid']}@{host_part}:{settings['port']}?{query}#{label}"
+    elif protocol == "vless":
+        uri = f"vless://{settings['uuid']}@{host_part}:{settings['port']}?encryption=none&type=tcp#{label}"
+    elif protocol == "vmess":
+        payload = {"v": "2", "ps": label, "add": host, "port": str(settings["port"]), "id": settings["uuid"], "aid": "0", "scy": "auto", "net": "tcp", "type": "none"}
+        encoded = base64.urlsafe_b64encode(json.dumps(payload, separators=(",", ":")).encode()).decode().rstrip("=")
+        uri = f"vmess://{encoded}"
+    elif protocol == "shadowsocks":
+        userinfo = base64.urlsafe_b64encode(f"{settings['method']}:{settings['password']}".encode()).decode().rstrip("=")
+        uri = f"ss://{userinfo}@{host_part}:{settings['port']}#{urllib.parse.quote(label)}"
+    elif protocol in {"socks", "http"}:
+        scheme = "socks5" if protocol == "socks" else "http"
+        userinfo = f"{urllib.parse.quote(settings['username'])}:{urllib.parse.quote(settings['password'])}@"
+        uri = f"{scheme}://{userinfo}{host_part}:{settings['port']}"
+    elif protocol == "trojan":
+        uri = f"trojan://{urllib.parse.quote(settings['password'])}@{host_part}:{settings['port']}?security=none&type=tcp#{urllib.parse.quote(label)}"
+    else:
+        raise SingBoxError("当前入口协议暂不支持客户端 URI")
+    return {"protocol": protocol, "uri": uri}
 
 
 def recent_logs(limit: int = 80) -> list[str]:

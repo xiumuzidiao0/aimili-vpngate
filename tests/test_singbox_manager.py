@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import singbox_manager
 
@@ -69,6 +70,27 @@ class SingBoxManagerTests(unittest.TestCase):
         self.assertTrue(uri.startswith("vless://"))
         self.assertIn("security=reality", uri)
         self.assertIn("pbk=public-key", uri)
+
+    def test_supported_protocols_build_a_vpngate_chain(self):
+        for protocol in sorted(singbox_manager.SUPPORTED_PROTOCOLS):
+            settings = singbox_manager.default_settings(7928)
+            settings["protocol"] = protocol
+            settings["port"] = 4500
+            if protocol == "vless-reality":
+                settings.update({"private_key": "private-key", "public_key": "public-key"})
+            normalized = singbox_manager.normalize_settings(settings, 7928, {8787, 7928})
+            config = singbox_manager.build_proxy_chain_config(normalized)
+            self.assertEqual(config["route"]["final"], "vpngate-chain")
+            self.assertEqual(config["outbounds"][0]["server_port"], 7928)
+            self.assertEqual(config["inbounds"][0]["type"], "vless" if protocol == "vless-reality" else protocol)
+
+    def test_openrc_reload_maps_to_restart(self):
+        with patch.object(singbox_manager, "_service_manager", return_value="openrc"), \
+             patch.object(singbox_manager, "_run") as run, \
+             patch.object(singbox_manager, "status", return_value={"running": True}):
+            run.return_value.returncode = 0
+            singbox_manager.service_action("reload")
+            run.assert_called_once_with(["rc-service", "sing-box", "restart"], timeout=30)
 
 
 if __name__ == "__main__":
