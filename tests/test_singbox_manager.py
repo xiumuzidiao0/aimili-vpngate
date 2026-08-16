@@ -124,13 +124,14 @@ class SingBoxManagerTests(unittest.TestCase):
 
     def test_multiple_vpn_exits_get_separate_outbounds(self):
         first = singbox_manager.new_node(7928, "vless")
-        first.update({"id": "default-node", "port": 4500, "vpn_exit_id": "default"})
+        first.update({"id": "default-node", "name": "主机直连", "port": 4500, "vpn_exit_id": "default"})
         second = singbox_manager.new_node(7928, "shadowsocks")
         second.update({"id": "japan-node", "port": 4501, "local_http_port": 7929, "vpn_exit_id": "japan"})
 
         normalized = singbox_manager.normalize_nodes(
             [first, second], 7928, {8787, 7928}, {7928, 7929},
         )
+        self.assertEqual(normalized[0]["name"], "主机直连")
         config = singbox_manager.build_proxy_chain_nodes(normalized)
         http_outbounds = [item for item in config["outbounds"] if item["type"] == "http"]
         self.assertEqual({item["server_port"] for item in http_outbounds}, {7928, 7929})

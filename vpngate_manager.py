@@ -3843,6 +3843,7 @@ INDEX_HTML = r"""<!doctype html>
           <button type="button" class="test-btn" title="删除当前协议节点" onclick="deleteSingboxNode()">删除</button>
         </div>
         <div id="sb_node_table" style="margin:-4px 0 16px;border:1px solid var(--border-color);border-radius:6px;overflow:hidden;"></div>
+        <div class="form-group" style="margin-bottom:12px;"><label class="form-label" for="sb_name">节点名称</label><input id="sb_name" type="text" class="input-field" maxlength="80" required placeholder="例如：VLESS-日本主机"></div>
         <div class="form-group" style="margin-bottom:12px;"><label class="form-label" for="sb_protocol">入口协议</label><select id="sb_protocol" class="input-field" onchange="toggleSingboxProtocolFields()"><option value="vless-reality">VLESS-REALITY</option><option value="tuic">TUIC</option><option value="hysteria2">Hysteria2</option><option value="anytls">AnyTLS</option><option value="vless">VLESS (TCP)</option><option value="vmess">VMess (TCP)</option><option value="trojan">Trojan (TCP)</option><option value="shadowsocks">Shadowsocks</option><option value="socks">SOCKS5</option><option value="http">HTTP</option></select></div>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
           <div class="form-group" style="margin-bottom:12px;"><label class="form-label" for="sb_listen">公网监听地址</label><select id="sb_listen" class="input-field"><option value="0.0.0.0">IPv4 (0.0.0.0)</option><option value="::">IPv4 + IPv6 (::)</option></select></div>
@@ -5469,6 +5470,7 @@ async function saveSingboxCombinations() {
 }
 
 function fillSingboxForm(settings) {
+  $("sb_name").value = settings.name || settings.protocol || "协议节点";
   $("sb_enabled").checked = !!settings.enabled;
   $("sb_chain_enabled").checked = !!settings.chain_enabled;
   $("sb_protocol").value = settings.protocol || "vless-reality";
@@ -5549,6 +5551,7 @@ function collectSingboxNode() {
   if (!previous) return null;
   const node = {
     ...previous,
+    name: $("sb_name").value.trim(),
     enabled: $("sb_enabled").checked,
     chain_enabled: $("sb_chain_enabled").checked,
     protocol: $("sb_protocol").value,
@@ -5580,7 +5583,7 @@ function addSingboxNode() {
   while (usedPorts.has(port) || port === Number(state && state.proxy_port) || port === 8787) port += 1;
   const id = (crypto.randomUUID ? crypto.randomUUID().replaceAll("-", "").slice(0, 12) : `${Date.now()}${Math.random()}`).replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 12);
   const node = {
-    id, name: "新协议节点", enabled: true, chain_enabled: true, protocol: "vless-reality",
+    id, name: `新协议节点 ${singboxNodes.length + 1}`, enabled: true, chain_enabled: true, protocol: "vless-reality",
     listen: "0.0.0.0", port, public_host: $("sb_public_host").value.trim(), uuid: "",
     server_name: "www.cloudflare.com", short_id: "", private_key: "", public_key: "",
     password: "", method: "chacha20-ietf-poly1305", username: "aimilivpn", vpn_exit_id: "direct"
@@ -5637,7 +5640,10 @@ async function renderSingboxLinks() {
       const data = await res.json();
       if (!res.ok || !data.ok || !data.data.uri) continue;
       const row = document.createElement("div");
-      row.style.cssText = "display:flex;gap:8px;align-items:center;";
+      row.style.cssText = "display:grid;grid-template-columns:140px minmax(0,1fr) auto;gap:8px;align-items:center;";
+      const name = document.createElement("span");
+      name.textContent = node.name || node.protocol || node.id;
+      name.style.cssText = "overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-primary);font-size:12px;";
       const input = document.createElement("input");
       input.className = "input-field mono";
       input.value = data.data.uri;
@@ -5647,7 +5653,7 @@ async function renderSingboxLinks() {
       button.className = "connect-btn";
       button.textContent = "复制";
       button.onclick = () => copySingboxLink(data.data.uri);
-      row.append(input, button);
+      row.append(name, input, button);
       list.appendChild(row);
     } catch (_) {}
   }
