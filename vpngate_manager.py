@@ -241,10 +241,7 @@ def load_ui_config() -> dict[str, Any]:
                 "private_key": "",
                 "public_key": "",
                 "public_host": "",
-                "upstream_host": "127.0.0.1",
-                "upstream_port": LOCAL_PROXY_PORT,
-                "upstream_username": "",
-                "upstream_password": "",
+                "local_http_port": LOCAL_PROXY_PORT,
                 "last_apply_at": 0,
                 "last_error": ""
             }
@@ -294,9 +291,13 @@ def load_ui_config() -> dict[str, Any]:
             if key not in config["singbox"]:
                 config["singbox"][key] = value
                 updated = True
-        if config["singbox"].get("upstream_port") != normalized_proxy_port:
-            config["singbox"]["upstream_port"] = normalized_proxy_port
+        if config["singbox"].get("local_http_port") != normalized_proxy_port:
+            config["singbox"]["local_http_port"] = normalized_proxy_port
             updated = True
+        for legacy_key in ("upstream_host", "upstream_port", "upstream_username", "upstream_password"):
+            if legacy_key in config["singbox"]:
+                config["singbox"].pop(legacy_key, None)
+                updated = True
             
         if not auth_file.exists() or updated:
             try:
@@ -3549,8 +3550,8 @@ INDEX_HTML = r"""<!doctype html>
         </div>
         <div style="border-top:1px dashed rgba(255,255,255,0.08);padding-top:14px;margin-top:6px;">
           <div style="font-size:13px;color:var(--text-primary);font-weight:600;margin-bottom:6px;">固定出站链路</div>
-          <div id="sb_upstream_display" class="mono" style="padding:10px 12px;background:rgba(255,255,255,0.03);border:1px solid var(--border-color);border-radius:6px;">SOCKS5 127.0.0.1:7928 -> tun0 -> VPNGate</div>
-          <div style="font-size:12px;color:var(--text-secondary);line-height:1.45;margin-top:8px;">出站固定指向 AimiliVPN 本地 SOCKS5，不允许 direct 回退；VPN 节点切换后客户端配置无需变更。</div>
+          <div id="sb_upstream_display" class="mono" style="padding:10px 12px;background:rgba(255,255,255,0.03);border:1px solid var(--border-color);border-radius:6px;">HTTP 127.0.0.1:7928 -> tun0 -> VPNGate</div>
+          <div style="font-size:12px;color:var(--text-secondary);line-height:1.45;margin-top:8px;">出站固定指向 AimiliVPN 本地 HTTP 代理，不允许 direct 回退；VPN 节点切换后客户端配置无需变更。</div>
         </div>
         <div class="form-group" style="margin:16px 0 10px;"><label class="form-label" for="sb_client_uri">客户端连接地址</label><textarea id="sb_client_uri" class="input-field" rows="3" readonly placeholder="保存配置并填写客户端服务器地址后生成"></textarea></div>
         <button type="button" class="connect-btn" style="margin-bottom:16px;" onclick="loadSingboxClientInfo()">刷新客户端连接地址</button>
@@ -4798,8 +4799,8 @@ function fillSingboxForm(settings) {
   $("sb_username").value = settings.username || "aimilivpn";
   $("sb_method").value = settings.method || "chacha20-ietf-poly1305";
   toggleSingboxProtocolFields();
-  const upstreamPort = settings.upstream_port || (state && state.proxy_port) || 7928;
-  $("sb_upstream_display").textContent = `SOCKS5 127.0.0.1:${upstreamPort} -> tun0 -> VPNGate`;
+  const localHttpPort = settings.local_http_port || (state && state.proxy_port) || 7928;
+  $("sb_upstream_display").textContent = `HTTP 127.0.0.1:${localHttpPort} -> tun0 -> VPNGate`;
 }
 
 function toggleSingboxProtocolFields() {
@@ -4818,7 +4819,7 @@ function toggleSingboxProtocolFields() {
 function renderSingboxRuntime(runtime) {
   const statusEl = $("singbox_runtime_status");
   if (!runtime.installed) {
-    statusEl.textContent = "未安装。安装后会自动生成 VLESS-REALITY -> VPNGate SOCKS5 配置。";
+    statusEl.textContent = "未安装。安装后会自动生成 VLESS-REALITY -> VPNGate 本地 HTTP 配置。";
     return;
   }
   const service = runtime.running ? "服务运行中" : "服务已停止";
@@ -5731,15 +5732,13 @@ class Handler(BaseHTTPRequestHandler):
                     raise ValueError("代理链设置必须是对象")
                 allowed_fields = {
                     "enabled", "chain_enabled", "protocol", "listen", "port", "uuid", "server_name",
-                    "short_id", "private_key", "public_key", "public_host", "password", "method", "username",
-                    "upstream_host", "upstream_port", "upstream_username", "upstream_password"
+                    "short_id", "private_key", "public_key", "public_host", "password", "method", "username"
                 }
                 settings = current_singbox_settings()
                 settings.update({key: value for key, value in incoming.items() if key in allowed_fields})
                 ui_cfg = load_ui_config()
                 proxy_port = bounded_int(ui_cfg.get("proxy_port"), LOCAL_PROXY_PORT, 1024, 65535)
-                settings["upstream_host"] = "127.0.0.1"
-                settings["upstream_port"] = proxy_port
+                settings["local_http_port"] = proxy_port
                 forbidden_ports = {bounded_int(ui_cfg.get("port"), UI_PORT, 1, 65535), proxy_port}
                 saved = singbox_manager.save_config(settings, proxy_port, forbidden_ports)
                 ui_cfg["singbox"] = saved
@@ -5793,8 +5792,7 @@ class Handler(BaseHTTPRequestHandler):
                     settings["enabled"] = True
                     settings["chain_enabled"] = True
                     proxy_port = bounded_int(ui_cfg.get("proxy_port"), LOCAL_PROXY_PORT, 1024, 65535)
-                    settings["upstream_host"] = "127.0.0.1"
-                    settings["upstream_port"] = proxy_port
+                    settings["local_http_port"] = proxy_port
                     saved = singbox_manager.save_config(
                         settings,
                         proxy_port,
@@ -5924,7 +5922,7 @@ class Handler(BaseHTTPRequestHandler):
 
                 if new_proxy_port_int != expected_proxy_port:
                     singbox_settings = current_singbox_settings(ui_cfg)
-                    singbox_settings["upstream_port"] = new_proxy_port_int
+                    singbox_settings["local_http_port"] = new_proxy_port_int
                     if singbox_settings.get("enabled") and singbox_settings.get("chain_enabled"):
                         try:
                             singbox_settings = singbox_manager.save_config(

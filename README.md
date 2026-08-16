@@ -7,7 +7,7 @@ Bilingual: [中文](#中文) | [English](#english)
 <a name="中文"></a>
 ## 中文 (Chinese)
 
-AimiliVPN 是一款基于官方 VPNGate 开放协议的高性能 VPN 代理网关。它提供节点测速、自动切换和 Web 管理，并集成 sing-box 协议入口：外部客户端可通过 VLESS-REALITY 接入，流量固定经由本机 SOCKS5、OpenVPN `tun0` 和当前 VPNGate 节点出站。
+AimiliVPN 是一款基于官方 VPNGate 开放协议的高性能 VPN 代理网关。它提供节点测速、自动切换和 Web 管理，并集成 sing-box 协议入口：外部客户端可通过 VLESS-REALITY 接入，流量固定经由本机 HTTP 代理、OpenVPN `tun0` 和当前 VPNGate 节点出站。
 
 ---
 
@@ -64,7 +64,7 @@ bash <(curl -Ls https://raw.githubusercontent.com/xiumuzidiao0/aimili-vpngate/ma
 
 安装脚本会一并部署 sing-box。登录 Web UI 后，打开“管理员 -> sing-box 代理链”，即可安装/检查服务、生成 VLESS-REALITY 凭据、设置公网入口端口和客户端服务器地址。链路固定为：
 
-当前 Web UI 可直接管理 VLESS-REALITY、VLESS、VMess、Trojan、Shadowsocks、SOCKS5 和 HTTP 入口；所有入口统一经由 AimiliVPN 本地 SOCKS5 和 VPNGate 出口。
+当前 Web UI 可直接管理 VLESS-REALITY、VLESS、VMess、Trojan、Shadowsocks、SOCKS5 和 HTTP 入口；所有入口统一经由 AimiliVPN 本地 HTTP 代理和 VPNGate 出口。
 
 ```text
 VLESS-REALITY 客户端 -> sing-box -> 127.0.0.1:7928 -> OpenVPN tun0 -> VPNGate 节点
@@ -149,7 +149,7 @@ VLESS-REALITY 客户端 -> sing-box -> 127.0.0.1:7928 -> OpenVPN tun0 -> VPNGate
 <a name="english"></a>
 ## English
 
-AimiliVPN is a VPNGate proxy gateway with node benchmarking, automatic switching, a Web UI, and an integrated sing-box protocol entrypoint. External clients can use VLESS-REALITY while all egress remains pinned to the local SOCKS5 gateway, OpenVPN `tun0`, and the active VPNGate node.
+AimiliVPN is a VPNGate proxy gateway with node benchmarking, automatic switching, a Web UI, and an integrated sing-box protocol entrypoint. External clients can use VLESS-REALITY while all egress remains pinned to the local HTTP proxy, OpenVPN `tun0`, and the active VPNGate node.
 
 ### 🌟 Recommended VPS Deals
 [![BandwagonHost Premium Optimized Routes](https://img.shields.io/badge/BandwagonHost-Premium%20Optimized%20Routes-red?style=for-the-badge)](https://bandwagonhost.com/aff.php?aff=81790)
@@ -199,7 +199,7 @@ To prevent unauthorized scanning and abuse of the proxy port on the public inter
 
 The installer also deploys sing-box. In the Web UI, open `Admin -> sing-box Proxy Chain` to install/check the service, generate VLESS-REALITY credentials, choose the public inbound port, and set the client-facing hostname.
 
-The Web UI currently manages VLESS-REALITY, VLESS, VMess, Trojan, Shadowsocks, SOCKS5, and HTTP inbounds. Every inbound uses the AimiliVPN local SOCKS5 gateway and VPNGate egress.
+The Web UI currently manages VLESS-REALITY, VLESS, VMess, Trojan, Shadowsocks, SOCKS5, and HTTP inbounds. Every inbound uses the AimiliVPN local HTTP proxy and VPNGate egress.
 
 ```text
 VLESS-REALITY client -> sing-box -> 127.0.0.1:7928 -> OpenVPN tun0 -> VPNGate node

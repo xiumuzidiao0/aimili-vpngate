@@ -202,10 +202,9 @@ def default_settings(proxy_port: int) -> dict[str, Any]:
         "password": secrets.token_urlsafe(18),
         "method": "chacha20-ietf-poly1305",
         "username": "aimilivpn",
-        "upstream_host": "127.0.0.1",
-        "upstream_port": proxy_port,
-        "upstream_username": "",
-        "upstream_password": "",
+        # VPNGate exposes the local egress as an HTTP proxy.  This is an
+        # internal implementation detail, not a user-configurable upstream.
+        "local_http_port": proxy_port,
         "last_apply_at": 0,
         "last_error": "",
     }
@@ -285,27 +284,19 @@ def normalize_settings(raw: dict[str, Any], proxy_port: int, forbidden_ports: se
     if protocol == "shadowsocks" and base["method"] not in SS_METHODS:
         raise SingBoxError("Shadowsocks 加密方式不受支持")
 
-    if str(base["upstream_host"] or "") != "127.0.0.1":
-        raise SingBoxError("代理链上游必须是本机 AimiliVPN SOCKS5 代理 127.0.0.1")
-    base["upstream_host"] = "127.0.0.1"
-    base["upstream_port"] = _as_port(base["upstream_port"], "上游 SOCKS5 端口", set())
-    if base["upstream_port"] != proxy_port:
-        raise SingBoxError("上游 SOCKS5 端口必须与 AimiliVPN 本地代理端口一致")
-    base["upstream_username"] = str(base["upstream_username"] or "")
-    base["upstream_password"] = str(base["upstream_password"] or "")
+    # Always use VPNGate's local HTTP listener.  Ignore obsolete upstream
+    # fields from earlier releases so a reinstall upgrades existing configs.
+    base["local_http_port"] = proxy_port
     return base
 
 
 def build_proxy_chain_config(settings: dict[str, Any]) -> dict[str, Any]:
-    socks_outbound: dict[str, Any] = {
-        "type": "socks",
+    http_outbound: dict[str, Any] = {
+        "type": "http",
         "tag": "vpngate-chain",
-        "server": settings["upstream_host"],
-        "server_port": settings["upstream_port"],
+        "server": "127.0.0.1",
+        "server_port": settings["local_http_port"],
     }
-    if settings["upstream_username"]:
-        socks_outbound["username"] = settings["upstream_username"]
-        socks_outbound["password"] = settings["upstream_password"]
 
     protocol = settings["protocol"]
     inbound: dict[str, Any] = {
@@ -340,7 +331,7 @@ def build_proxy_chain_config(settings: dict[str, Any]) -> dict[str, Any]:
     return {
         "log": {"level": "warn", "timestamp": True},
         "inbounds": [inbound],
-        "outbounds": [socks_outbound, {"type": "block", "tag": "block"}],
+        "outbounds": [http_outbound, {"type": "block", "tag": "block"}],
         "route": {"final": "vpngate-chain"},
     }
 
@@ -431,10 +422,7 @@ def extract_settings(config: dict[str, Any]) -> dict[str, Any]:
         "private_key": reality.get("private_key", ""),
         "public_key": "",
         "public_host": "",
-        "upstream_host": outbound.get("server", "127.0.0.1"),
-        "upstream_port": outbound.get("server_port", 7928),
-        "upstream_username": outbound.get("username", ""),
-        "upstream_password": outbound.get("password", ""),
+        "local_http_port": outbound.get("server_port", 7928),
         "password": inbound.get("password", first_user.get("password", "")),
         "method": inbound.get("method", "chacha20-ietf-poly1305"),
         "username": first_user.get("username", first_user.get("name", "aimilivpn")),
@@ -443,7 +431,7 @@ def extract_settings(config: dict[str, Any]) -> dict[str, Any]:
 
 def redact_settings(settings: dict[str, Any]) -> dict[str, Any]:
     redacted = settings.copy()
-    for key in ("private_key", "upstream_password", "password"):
+    for key in ("private_key", "password"):
         if redacted.get(key):
             redacted[key] = "***"
     return redacted

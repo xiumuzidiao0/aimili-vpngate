@@ -18,20 +18,20 @@ class SingBoxManagerTests(unittest.TestCase):
         config = singbox_manager.build_proxy_chain_config(normalized)
 
         self.assertEqual(config["route"]["final"], "vpngate-chain")
-        self.assertEqual(config["outbounds"][0]["type"], "socks")
+        self.assertEqual(config["outbounds"][0]["type"], "http")
         self.assertEqual(config["outbounds"][0]["server"], "127.0.0.1")
         self.assertEqual(config["outbounds"][0]["server_port"], 7928)
         self.assertNotIn("direct", [item["type"] for item in config["outbounds"]])
 
-    def test_proxy_chain_rejects_non_local_or_conflicting_ports(self):
+    def test_proxy_chain_forces_local_http_port(self):
         settings = singbox_manager.default_settings(7928)
         settings.update({"private_key": "private-key", "public_key": "public-key"})
 
+        # Obsolete upstream settings must not be able to redirect egress.
         settings["upstream_host"] = "198.51.100.8"
-        with self.assertRaises(singbox_manager.SingBoxError):
-            singbox_manager.normalize_settings(settings, 7928, {8787, 7928})
+        normalized = singbox_manager.normalize_settings(settings, 7928, {8787, 7928})
+        self.assertEqual(normalized["local_http_port"], 7928)
 
-        settings["upstream_host"] = "127.0.0.1"
         settings["port"] = 8787
         with self.assertRaises(singbox_manager.SingBoxError):
             singbox_manager.normalize_settings(settings, 7928, {8787, 7928})
@@ -54,7 +54,7 @@ class SingBoxManagerTests(unittest.TestCase):
                 saved = singbox_manager.save_config(settings, 7928, {8787, 7928})
                 self.assertTrue(config_path.exists())
                 self.assertEqual(config_path.stat().st_mode & 0o777, 0o600)
-                self.assertEqual(saved["upstream_port"], 7928)
+                self.assertEqual(saved["local_http_port"], 7928)
             finally:
                 singbox_manager.SINGBOX_BIN = old_bin
                 singbox_manager.SINGBOX_CONFIG = old_config
@@ -81,6 +81,7 @@ class SingBoxManagerTests(unittest.TestCase):
             normalized = singbox_manager.normalize_settings(settings, 7928, {8787, 7928})
             config = singbox_manager.build_proxy_chain_config(normalized)
             self.assertEqual(config["route"]["final"], "vpngate-chain")
+            self.assertEqual(config["outbounds"][0]["type"], "http")
             self.assertEqual(config["outbounds"][0]["server_port"], 7928)
             self.assertEqual(config["inbounds"][0]["type"], "vless" if protocol == "vless-reality" else protocol)
 

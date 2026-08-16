@@ -45,8 +45,8 @@
 2. 通过 AimiliVPN Web UI 获取、测速、筛选和切换 VPNGate 节点。
 3. 通过同一个 Web UI 配置代理链：
    - 对外入口：sing-box 的 VLESS/Reality、TUIC、Hysteria2 等协议。
-   - 中间转发：sing-box SOCKS5 出站。
-   - VPN 出口：AimiliVPN 本地 SOCKS5 代理 `127.0.0.1:7928`。
+   - 中间转发：sing-box HTTP 出站。
+   - VPN 出口：AimiliVPN 本地 HTTP 代理 `127.0.0.1:7928`。
    - 最终出口：当前选中的 VPNGate OpenVPN 节点。
 4. 在 Web UI 查看 VPN、AimiliVPN 本地代理和 sing-box 的运行状态。
 5. 在 Web UI 修改入口协议、端口、凭据以及代理链开关，并在配置变更后安全重载 sing-box。
@@ -78,7 +78,7 @@
 
                          数据平面
 +----------------+   +--------------------+   +--------------------+
-| 外部客户端     |-->| sing-box 入站       |-->| sing-box SOCKS 出站 |
+| 外部客户端     |-->| sing-box 入站       |-->| sing-box HTTP 出站  |
 | VLESS/TUIC/... |   | 公网端口            |   | 127.0.0.1:7928      |
 +----------------+   +--------------------+   +--------------------+
                                                         │
@@ -102,7 +102,7 @@
 
 ### 5.2 关键约束
 
-1. `sing-box` 的 SOCKS 出站必须指向 `127.0.0.1:7928`。
+1. `sing-box` 的 HTTP 出站必须指向 `127.0.0.1:7928`。
 2. `7928` 默认仅监听回环地址，避免形成未授权公网代理。
 3. sing-box 的公网入口端口不得与 Web UI、AimiliVPN 本地代理端口冲突。
 4. VPNGate 节点切换只改变 OpenVPN 出口，不改变 sing-box 入站端口和客户端配置。
@@ -220,11 +220,7 @@ def singbox_client_info() -> dict[str, Any]: ...
     "short_id": "generated-hex",
     "private_key": "generated-private-key",
     "public_key": "generated-public-key",
-    "upstream_type": "socks",
-    "upstream_host": "127.0.0.1",
-    "upstream_port": 7928,
-    "upstream_username": "",
-    "upstream_password": "",
+    "local_http_port": 7928,
     "config_path": "/etc/sing-box/config.json",
     "last_apply_at": 0,
     "last_error": ""
@@ -284,9 +280,9 @@ def singbox_client_info() -> dict[str, Any]: ...
 第一阶段建议生成最小可用的 VLESS-REALITY 配置：
 
 - `inbounds`：VLESS TCP Reality。
-- `outbounds[0]`：SOCKS5，目标 `127.0.0.1:7928`。
+- `outbounds[0]`：HTTP，目标 `127.0.0.1:7928`。
 - `outbounds[1]`：`block`，作为失败兜底，避免回退直连。
-- `route.final`：指向 SOCKS5 出站。
+- `route.final`：指向 HTTP 出站。
 - DNS 按 sing-box 当前版本支持的稳定配置生成。
 - 不启用 TUN 入站，避免与 OpenVPN `tun0` 冲突。
 - 不生成 direct final route，防止绕过 VPNGate 出口。
@@ -317,7 +313,7 @@ def singbox_client_info() -> dict[str, Any]: ...
   ],
   "outbounds": [
     {
-      "type": "socks",
+      "type": "http",
       "tag": "vpngate-chain",
       "server": "127.0.0.1",
       "server_port": 7928
