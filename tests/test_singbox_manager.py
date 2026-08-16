@@ -1,5 +1,8 @@
+import base64
+import json
 import tempfile
 import unittest
+import urllib.parse
 from pathlib import Path
 from unittest.mock import patch
 
@@ -89,6 +92,63 @@ class SingBoxManagerTests(unittest.TestCase):
         self.assertTrue(uri.startswith("vless://"))
         self.assertIn("security=reality", uri)
         self.assertIn("pbk=public-key", uri)
+
+    def test_client_uri_uses_each_node_name_host_and_port(self):
+        first = singbox_manager.default_settings(7928)
+        first.update({
+            "name": "日本入口 A",
+            "protocol": "vless",
+            "public_host": "vpn.example.com",
+            "port": 18443,
+        })
+        second = {**first, "name": "日本入口 B", "port": 28443}
+
+        first_uri = singbox_manager.client_info(first)["uri"]
+        second_uri = singbox_manager.client_info(second)["uri"]
+        first_parts = urllib.parse.urlsplit(first_uri)
+        second_parts = urllib.parse.urlsplit(second_uri)
+
+        self.assertEqual(first_parts.hostname, "vpn.example.com")
+        self.assertEqual(first_parts.port, 18443)
+        self.assertEqual(second_parts.port, 28443)
+        self.assertEqual(urllib.parse.unquote(first_parts.fragment), "日本入口 A")
+        self.assertEqual(urllib.parse.unquote(second_parts.fragment), "日本入口 B")
+        self.assertNotEqual(first_uri, second_uri)
+
+    def test_client_uri_formats_ipv6_and_reserved_credentials(self):
+        settings = singbox_manager.default_settings(7928)
+        settings.update({
+            "name": "IPv6 HTTP",
+            "protocol": "http",
+            "public_host": "[2001:db8::8]",
+            "port": 18080,
+            "username": "user@example.com",
+            "password": "p@ss:/?#",
+        })
+        info = singbox_manager.client_info(settings)
+        parts = urllib.parse.urlsplit(info["uri"])
+
+        self.assertEqual(info["endpoint"], "[2001:db8::8]:18080")
+        self.assertEqual(parts.hostname, "2001:db8::8")
+        self.assertEqual(parts.port, 18080)
+        self.assertEqual(urllib.parse.unquote(parts.username), "user@example.com")
+        self.assertEqual(urllib.parse.unquote(parts.password), "p@ss:/?#")
+        self.assertEqual(urllib.parse.unquote(parts.fragment), "IPv6 HTTP")
+
+    def test_vmess_client_uri_embeds_custom_node_name(self):
+        settings = singbox_manager.default_settings(7928)
+        settings.update({
+            "name": "自定义 VMess 节点",
+            "protocol": "vmess",
+            "public_host": "203.0.113.8",
+            "port": 34567,
+        })
+        encoded = singbox_manager.client_info(settings)["uri"].removeprefix("vmess://")
+        payload = json.loads(base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4)))
+
+        self.assertEqual(payload["ps"], "自定义 VMess 节点")
+        self.assertEqual(payload["add"], "203.0.113.8")
+        self.assertEqual(payload["port"], "34567")
 
     def test_supported_protocols_build_a_vpngate_chain(self):
         for protocol in sorted(singbox_manager.SUPPORTED_PROTOCOLS):

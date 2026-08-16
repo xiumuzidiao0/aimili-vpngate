@@ -636,51 +636,75 @@ def redact_settings(settings: dict[str, Any]) -> dict[str, Any]:
     return redacted
 
 
-def client_info(settings: dict[str, Any]) -> dict[str, str]:
-    host = str(settings.get("public_host") or "").strip()
+def client_info(settings: dict[str, Any]) -> dict[str, Any]:
+    host = str(settings.get("public_host") or "").strip().strip("[]")
     if not host:
         raise SingBoxError("请先设置客户端服务器地址或域名")
     protocol = settings.get("protocol", "vless-reality")
-    label = "AimiliVPN-" + PROTOCOL_LABELS.get(protocol, protocol)
-    host_part = f"[{host}]" if ":" in host and not host.startswith("[") else host
+    node_name = str(settings.get("name") or "").strip()
+    label = node_name or ("AimiliVPN-" + PROTOCOL_LABELS.get(protocol, protocol))
+    encoded_label = urllib.parse.quote(label, safe="")
+    host_part = f"[{host}]" if ":" in host else host
     if protocol == "vless-reality":
         if not settings.get("public_key"):
             raise SingBoxError("缺少 Reality 公钥，请重新生成密钥对后保存")
-        query = (
-            f"encryption=none&security=reality&sni={urllib.parse.quote(settings['server_name'])}&fp=chrome"
-            f"&pbk={urllib.parse.quote(settings['public_key'])}&sid={settings['short_id']}&type=tcp&flow=xtls-rprx-vision"
-        )
-        uri = f"vless://{settings['uuid']}@{host_part}:{settings['port']}?{query}#{label}"
+        query = urllib.parse.urlencode({
+            "encryption": "none",
+            "security": "reality",
+            "sni": settings["server_name"],
+            "fp": "chrome",
+            "pbk": settings["public_key"],
+            "sid": settings["short_id"],
+            "type": "tcp",
+            "flow": "xtls-rprx-vision",
+        })
+        uri = f"vless://{settings['uuid']}@{host_part}:{settings['port']}?{query}#{encoded_label}"
     elif protocol == "vless":
-        uri = f"vless://{settings['uuid']}@{host_part}:{settings['port']}?encryption=none&type=tcp#{label}"
+        query = urllib.parse.urlencode({"encryption": "none", "type": "tcp"})
+        uri = f"vless://{settings['uuid']}@{host_part}:{settings['port']}?{query}#{encoded_label}"
     elif protocol == "vmess":
         payload = {"v": "2", "ps": label, "add": host, "port": str(settings["port"]), "id": settings["uuid"], "aid": "0", "scy": "auto", "net": "tcp", "type": "none"}
         encoded = base64.urlsafe_b64encode(json.dumps(payload, separators=(",", ":")).encode()).decode().rstrip("=")
         uri = f"vmess://{encoded}"
     elif protocol == "shadowsocks":
         userinfo = base64.urlsafe_b64encode(f"{settings['method']}:{settings['password']}".encode()).decode().rstrip("=")
-        uri = f"ss://{userinfo}@{host_part}:{settings['port']}#{urllib.parse.quote(label)}"
+        uri = f"ss://{userinfo}@{host_part}:{settings['port']}#{encoded_label}"
     elif protocol in {"socks", "http"}:
         scheme = "socks5" if protocol == "socks" else "http"
-        userinfo = f"{urllib.parse.quote(settings['username'])}:{urllib.parse.quote(settings['password'])}@"
-        uri = f"{scheme}://{userinfo}{host_part}:{settings['port']}"
+        username = urllib.parse.quote(settings["username"], safe="")
+        password = urllib.parse.quote(settings["password"], safe="")
+        uri = f"{scheme}://{username}:{password}@{host_part}:{settings['port']}#{encoded_label}"
     elif protocol == "trojan":
-        uri = f"trojan://{urllib.parse.quote(settings['password'])}@{host_part}:{settings['port']}?security=none&type=tcp#{urllib.parse.quote(label)}"
+        password = urllib.parse.quote(settings["password"], safe="")
+        query = urllib.parse.urlencode({"security": "none", "type": "tcp"})
+        uri = f"trojan://{password}@{host_part}:{settings['port']}?{query}#{encoded_label}"
     elif protocol == "tuic":
+        password = urllib.parse.quote(settings["password"], safe="")
+        query = urllib.parse.urlencode({"alpn": "h3", "insecure": "1", "congestion_control": "bbr"})
         uri = (
-            f"tuic://{settings['uuid']}:{urllib.parse.quote(settings['password'])}@{host_part}:{settings['port']}"
-            f"?alpn=h3&insecure=1&congestion_control=bbr#{urllib.parse.quote(label)}"
+            f"tuic://{settings['uuid']}:{password}@{host_part}:{settings['port']}"
+            f"?{query}#{encoded_label}"
         )
     elif protocol == "hysteria2":
+        password = urllib.parse.quote(settings["password"], safe="")
+        query = urllib.parse.urlencode({"alpn": "h3", "insecure": "1"})
         uri = (
-            f"hysteria2://{urllib.parse.quote(settings['password'])}@{host_part}:{settings['port']}"
-            f"?alpn=h3&insecure=1#{urllib.parse.quote(label)}"
+            f"hysteria2://{password}@{host_part}:{settings['port']}"
+            f"?{query}#{encoded_label}"
         )
     elif protocol == "anytls":
-        uri = f"anytls://{urllib.parse.quote(settings['password'])}@{host_part}:{settings['port']}?insecure=1#{urllib.parse.quote(label)}"
+        password = urllib.parse.quote(settings["password"], safe="")
+        uri = f"anytls://{password}@{host_part}:{settings['port']}?insecure=1#{encoded_label}"
     else:
         raise SingBoxError("当前入口协议暂不支持客户端 URI")
-    return {"protocol": protocol, "uri": uri}
+    return {
+        "name": label,
+        "protocol": protocol,
+        "server": host,
+        "port": int(settings["port"]),
+        "endpoint": f"{host_part}:{settings['port']}",
+        "uri": uri,
+    }
 
 
 def recent_logs(limit: int = 80) -> list[str]:

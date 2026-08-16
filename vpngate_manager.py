@@ -3872,8 +3872,8 @@ INDEX_HTML = r"""<!doctype html>
           <div class="mono" style="padding:10px 12px;background:rgba(255,255,255,0.03);border:1px solid var(--border-color);border-radius:6px;">direct -> 主机网络</div>
           <div style="font-size:12px;color:var(--text-secondary);line-height:1.45;margin-top:8px;">sing-box 节点默认使用主机网络。需要经过 VPNGate 时，请在“节点组合”页面单独绑定 VPNGate 出口。</div>
         </div>
-        <div class="form-group" style="margin:16px 0 10px;"><label class="form-label" for="sb_client_uri">客户端连接地址</label><textarea id="sb_client_uri" class="input-field" rows="3" readonly placeholder="保存配置并填写客户端服务器地址后生成"></textarea></div>
-        <button type="button" class="connect-btn" style="margin-bottom:16px;" onclick="loadSingboxClientInfo()">刷新客户端连接地址</button>
+        <div class="form-group" style="margin:16px 0 10px;"><label class="form-label" for="sb_client_uri">当前节点客户端导入链接</label><textarea id="sb_client_uri" class="input-field" rows="3" readonly placeholder="保存配置并填写客户端服务器地址后生成"></textarea></div>
+        <button type="button" class="connect-btn" style="margin-bottom:16px;" onclick="loadSingboxClientInfo()">刷新客户端导入链接</button>
         <div id="sb_node_links" style="display:grid;gap:8px;margin-bottom:16px;"></div>
         <div style="display:flex;gap:12px;justify-content:flex-end;"><button type="button" onclick="closeSingboxModal()" style="height:40px;padding:0 16px;font-weight:600;border-radius:8px;border:1px solid var(--border-color);background:transparent;color:var(--text-secondary);cursor:pointer;">取消</button><button type="submit" id="singbox_submit_btn" class="btn-primary" style="height:40px;padding:0 20px;font-weight:600;border-radius:8px;">保存并应用</button></div>
       </form>
@@ -5642,7 +5642,9 @@ async function renderSingboxLinks() {
       const row = document.createElement("div");
       row.style.cssText = "display:grid;grid-template-columns:140px minmax(0,1fr) auto;gap:8px;align-items:center;";
       const name = document.createElement("span");
-      name.textContent = node.name || node.protocol || node.id;
+      const displayName = data.data.name || node.name || node.protocol || node.id;
+      name.textContent = data.data.endpoint ? `${displayName} (${data.data.endpoint})` : displayName;
+      name.title = name.textContent;
       name.style.cssText = "overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-primary);font-size:12px;";
       const input = document.createElement("input");
       input.className = "input-field mono";
@@ -6698,6 +6700,7 @@ class Handler(BaseHTTPRequestHandler):
                     {bounded_int(ui_cfg.get("port"), UI_PORT, 1, 65535), proxy_port},
                     {item["proxy_port"] for item in exits},
                 )
+                normalized["name"] = str(settings.get("name") or "").strip()
                 self.send_json({"ok": True, "data": singbox_manager.client_info(normalized)})
             except (ValueError, singbox_manager.SingBoxError) as exc:
                 self.send_json({"ok": False, "error": str(exc)}, HTTPStatus.BAD_REQUEST)
