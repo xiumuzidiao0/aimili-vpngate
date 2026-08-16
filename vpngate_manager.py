@@ -666,6 +666,11 @@ def bind_singbox_nodes_to_vpn_exits(raw_nodes: list[dict[str, Any]], exits: list
     bound_nodes: list[dict[str, Any]] = []
     for raw in raw_nodes:
         exit_id = str(raw.get("vpn_exit_id") or "default").strip()
+        if exit_id == "direct":
+            node = dict(raw)
+            node["vpn_exit_id"] = "direct"
+            bound_nodes.append(node)
+            continue
         exit_config = exits_by_id.get(exit_id)
         if not exit_config:
             raise singbox_manager.SingBoxError("协议节点选择的 VPN 出口不存在")
@@ -731,7 +736,10 @@ def singbox_api_status(ui_cfg: dict[str, Any] | None = None) -> dict[str, Any]:
     enabled_nodes = [node for node in nodes if node.get("enabled") and node.get("chain_enabled")]
     has_enabled_node = bool(enabled_nodes)
     exits_by_id = {item["id"]: vpn_exit_status(item) for item in current_vpn_exits(ui_cfg)}
-    required_exits = {str(node.get("vpn_exit_id") or "default") for node in enabled_nodes}
+    required_exits = {
+        str(node.get("vpn_exit_id") or "direct") for node in enabled_nodes
+        if str(node.get("vpn_exit_id") or "direct") != "direct"
+    }
     missing_exits = [exit_id for exit_id in required_exits if not exits_by_id.get(exit_id, {}).get("running")]
     try:
         runtime = singbox_manager.status()
@@ -3564,11 +3572,15 @@ INDEX_HTML = r"""<!doctype html>
         </a>
         <a href="javascript:void(0)" onclick="openSingboxModal()">
           <svg xmlns="http://www.w3.org/2000/svg" style="width:14px; height:14px;" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 7h16M4 12h16M4 17h10" /></svg>
-          sing-box 代理链
+          sing-box 节点
+        </a>
+        <a href="javascript:void(0)" onclick="openSingboxCombinationsModal()">
+          <svg xmlns="http://www.w3.org/2000/svg" style="width:14px; height:14px;" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01" /></svg>
+          节点组合
         </a>
         <a href="javascript:void(0)" onclick="openVpnExitsModal()">
           <svg xmlns="http://www.w3.org/2000/svg" style="width:14px; height:14px;" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M3 7h18M6 3v4m12-4v4M5 11h14v8H5z" /></svg>
-          VPN 出口
+          VPNGate 出口
         </a>
         <a href="javascript:void(0)" onclick="openGatewayModal()">
           <svg xmlns="http://www.w3.org/2000/svg" style="width:14px; height:14px;" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" /></svg>
@@ -3808,7 +3820,7 @@ INDEX_HTML = r"""<!doctype html>
   <div id="singbox_modal" class="modal">
     <div class="modal-content" style="max-width: 640px; width: 94%; max-height: 88vh; overflow-y: auto;">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:18px;">
-        <div><h3 style="margin:0;font-size:18px;color:var(--text-primary);">sing-box 代理链</h3><div id="singbox_runtime_status" style="font-size:12px;color:var(--text-secondary);margin-top:5px;">正在读取服务状态...</div></div>
+        <div><h3 style="margin:0;font-size:18px;color:var(--text-primary);">sing-box 节点</h3><div id="singbox_runtime_status" style="font-size:12px;color:var(--text-secondary);margin-top:5px;">正在读取服务状态...</div></div>
         <button type="button" onclick="closeSingboxModal()" title="关闭" style="background:transparent;border:none;padding:4px;cursor:pointer;color:var(--text-secondary);width:28px;height:28px;">&#10005;</button>
       </div>
       <div id="singbox_error" style="color:var(--danger);font-size:13px;margin-bottom:12px;padding:8px 12px;background:rgba(244,63,94,0.1);border:1px solid rgba(244,63,94,0.2);border-radius:6px;display:none;"></div>
@@ -3823,7 +3835,7 @@ INDEX_HTML = r"""<!doctype html>
       <form id="singbox_form" onsubmit="saveSingboxConfig(event)">
         <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin-bottom:16px;">
           <label class="form-label" style="display:flex;align-items:center;gap:8px;margin:0;"><input id="sb_enabled" type="checkbox"> 启用 sing-box 入口</label>
-          <label class="form-label" style="display:flex;align-items:center;gap:8px;margin:0;"><input id="sb_chain_enabled" type="checkbox"> 启用 VPNGate 代理链</label>
+          <label class="form-label" style="display:flex;align-items:center;gap:8px;margin:0;"><input id="sb_chain_enabled" type="checkbox"> 启用出站流量</label>
         </div>
         <div style="display:flex;gap:8px;align-items:center;margin-bottom:16px;">
           <select id="sb_node_select" class="input-field" onchange="selectSingboxNode(this.value)" style="flex:1;"></select>
@@ -3837,7 +3849,6 @@ INDEX_HTML = r"""<!doctype html>
           <div class="form-group" style="margin-bottom:12px;"><label class="form-label" for="sb_port">公网入口端口</label><input id="sb_port" type="number" class="input-field" min="1" max="65535" required></div>
         </div>
         <div class="form-group" style="margin-bottom:12px;"><label class="form-label" for="sb_public_host">客户端服务器地址或域名</label><input id="sb_public_host" type="text" class="input-field" placeholder="自动填入服务器公网 IP，也可填写域名"></div>
-        <div class="form-group" style="margin-bottom:12px;"><label class="form-label" for="sb_vpn_exit">目标 VPN 出口</label><select id="sb_vpn_exit" class="input-field" onchange="refreshSingboxExitDisplay()"></select></div>
         <div id="sb_reality_fields" style="border-top:1px dashed rgba(255,255,255,0.08);padding-top:14px;margin-top:6px;">
           <div style="font-size:13px;color:var(--text-primary);font-weight:600;margin-bottom:12px;">VLESS-REALITY 凭据</div>
           <div class="form-group" style="margin-bottom:12px;"><label class="form-label" for="sb_uuid">UUID</label><div style="display:flex;gap:8px;"><input id="sb_uuid" type="text" class="input-field" required><button type="button" class="connect-btn" onclick="regenerateSingbox('uuid')">生成</button></div></div>
@@ -3856,9 +3867,9 @@ INDEX_HTML = r"""<!doctype html>
           <div class="form-group" style="margin-bottom:12px;"><label class="form-label" for="sb_method">Shadowsocks 加密方式</label><select id="sb_method" class="input-field"><option value="chacha20-ietf-poly1305">chacha20-ietf-poly1305</option><option value="aes-128-gcm">aes-128-gcm</option><option value="aes-256-gcm">aes-256-gcm</option><option value="2022-blake3-aes-128-gcm">2022-blake3-aes-128-gcm</option><option value="2022-blake3-aes-256-gcm">2022-blake3-aes-256-gcm</option><option value="2022-blake3-chacha20-poly1305">2022-blake3-chacha20-poly1305</option></select></div>
         </div>
         <div style="border-top:1px dashed rgba(255,255,255,0.08);padding-top:14px;margin-top:6px;">
-          <div style="font-size:13px;color:var(--text-primary);font-weight:600;margin-bottom:6px;">固定出站链路</div>
-          <div id="sb_upstream_display" class="mono" style="padding:10px 12px;background:rgba(255,255,255,0.03);border:1px solid var(--border-color);border-radius:6px;">HTTP 127.0.0.1:7928 -> tun0 -> VPNGate</div>
-          <div style="font-size:12px;color:var(--text-secondary);line-height:1.45;margin-top:8px;">出站固定指向 AimiliVPN 本地 HTTP 代理，不允许 direct 回退；VPN 节点切换后客户端配置无需变更。</div>
+          <div style="font-size:13px;color:var(--text-primary);font-weight:600;margin-bottom:6px;">默认出站</div>
+          <div class="mono" style="padding:10px 12px;background:rgba(255,255,255,0.03);border:1px solid var(--border-color);border-radius:6px;">direct -> 主机网络</div>
+          <div style="font-size:12px;color:var(--text-secondary);line-height:1.45;margin-top:8px;">sing-box 节点默认使用主机网络。需要经过 VPNGate 时，请在“节点组合”页面单独绑定 VPNGate 出口。</div>
         </div>
         <div class="form-group" style="margin:16px 0 10px;"><label class="form-label" for="sb_client_uri">客户端连接地址</label><textarea id="sb_client_uri" class="input-field" rows="3" readonly placeholder="保存配置并填写客户端服务器地址后生成"></textarea></div>
         <button type="button" class="connect-btn" style="margin-bottom:16px;" onclick="loadSingboxClientInfo()">刷新客户端连接地址</button>
@@ -3891,6 +3902,20 @@ INDEX_HTML = r"""<!doctype html>
         <label class="form-label" style="display:flex;align-items:center;gap:8px;margin:0 0 16px;"><input id="ve_enabled" type="checkbox" checked> 启用此出口</label>
         <div style="display:flex;gap:8px;justify-content:flex-end;"><button type="button" class="connect-btn" onclick="addVpnExit()">新增出口</button><button type="submit" class="btn-primary" id="vpn_exit_submit_btn">保存出口配置</button></div>
       </form>
+    </div>
+  </div>
+
+  <!-- sing-box and VPNGate combination modal -->
+  <div id="singbox_combinations_modal" class="modal">
+    <div class="modal-content" style="max-width:760px;width:94%;max-height:88vh;overflow-y:auto;">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:18px;">
+        <div><h3 style="margin:0;font-size:18px;color:var(--text-primary);">节点组合</h3><div style="font-size:12px;color:var(--text-secondary);margin-top:5px;">把 sing-box 节点绑定到主机网络或指定 VPNGate 出口。</div></div>
+        <button type="button" onclick="closeSingboxCombinationsModal()" title="关闭" style="background:transparent;border:none;padding:4px;cursor:pointer;color:var(--text-secondary);width:28px;height:28px;">&#10005;</button>
+      </div>
+      <div id="singbox_combinations_error" style="color:var(--danger);font-size:13px;margin-bottom:12px;padding:8px 12px;background:rgba(244,63,94,0.1);border:1px solid rgba(244,63,94,0.2);border-radius:6px;display:none;"></div>
+      <div id="singbox_combinations_success" style="color:var(--success);font-size:13px;margin-bottom:12px;padding:8px 12px;background:rgba(16,185,129,0.1);border:1px solid rgba(16,185,129,0.2);border-radius:6px;display:none;"></div>
+      <div id="singbox_combinations_table" style="border:1px solid var(--border-color);border-radius:6px;overflow:hidden;margin-bottom:16px;"></div>
+      <div style="display:flex;justify-content:flex-end;gap:8px;"><button type="button" class="connect-btn" onclick="refreshSingboxCombinations()">刷新</button><button type="button" class="btn-primary" id="singbox_combinations_save" onclick="saveSingboxCombinations()">保存并应用</button></div>
     </div>
   </div>
 
@@ -5183,26 +5208,6 @@ function filterVpnExitNodes() {
   populateVpnExitNodeSelect(selectedNodeId);
 }
 
-function populateSingboxExitSelect(exitId) {
-  const select = $("sb_vpn_exit");
-  if (!select) return;
-  select.innerHTML = "";
-  for (const exitConfig of vpnExits) {
-    const option = document.createElement("option");
-    option.value = exitConfig.id;
-    option.textContent = vpnExitLabel(exitConfig) + (exitConfig.running ? "" : " (未连接)");
-    select.appendChild(option);
-  }
-  select.value = vpnExits.some(item => item.id === exitId) ? exitId : "default";
-}
-
-function refreshSingboxExitDisplay() {
-  const exitConfig = vpnExits.find(item => item.id === $("sb_vpn_exit").value) || vpnExits.find(item => item.id === "default");
-  const port = exitConfig ? exitConfig.proxy_port : ((state && state.proxy_port) || 7928);
-  const tun = exitConfig ? exitConfig.tun_name : "tun0";
-  $("sb_upstream_display").textContent = `HTTP 127.0.0.1:${port} -> ${tun} -> VPNGate`;
-}
-
 function selectedVpnExit() {
   return vpnExits.find(item => item.id === selectedVpnExitId) || vpnExits[0] || null;
 }
@@ -5310,8 +5315,6 @@ async function saveVpnExits(event) {
     vpnExits = data.exits || vpnExits;
     fillVpnExitForm(selectedVpnExit());
     renderVpnExitTable();
-    populateSingboxExitSelect($("sb_vpn_exit").value);
-    refreshSingboxExitDisplay();
     setVpnExitMessage("success", data.message || "VPN 出口配置已保存");
   } catch (err) {
     setVpnExitMessage("error", err.message || "保存 VPN 出口配置失败");
@@ -5331,8 +5334,6 @@ async function vpnExitAction(id, action) {
     if (statusRes.ok && statusData.ok) vpnExits = statusData.exits || vpnExits;
     fillVpnExitForm(selectedVpnExit());
     renderVpnExitTable();
-    populateSingboxExitSelect($("sb_vpn_exit").value);
-    refreshSingboxExitDisplay();
     setVpnExitMessage("success", data.message || "VPN 出口操作成功");
     await load();
   } catch (err) {
@@ -5362,6 +5363,111 @@ function closeVpnExitsModal() {
   $("vpn_exits_modal").style.display = "none";
 }
 
+function setCombinationMessage(type, message) {
+  const errorEl = $("singbox_combinations_error");
+  const successEl = $("singbox_combinations_success");
+  errorEl.style.display = "none";
+  successEl.style.display = "none";
+  if (!message) return;
+  const target = type === "error" ? errorEl : successEl;
+  target.textContent = message;
+  target.style.display = "block";
+}
+
+function combinationExitLabel(exitConfig) {
+  if (exitConfig.id === "direct") return "direct（主机网络）";
+  return `${exitConfig.name || exitConfig.id} · 127.0.0.1:${exitConfig.proxy_port}${exitConfig.running ? "（运行中）" : "（未连接）"}`;
+}
+
+function renderSingboxCombinations() {
+  const table = $("singbox_combinations_table");
+  table.innerHTML = "";
+  for (const node of singboxNodes) {
+    const row = document.createElement("div");
+    row.style.cssText = "display:grid;grid-template-columns:minmax(0,1fr) minmax(230px,1fr);gap:12px;align-items:center;padding:11px 12px;border-bottom:1px solid var(--border-color);";
+    const title = document.createElement("div");
+    title.style.cssText = "min-width:0;";
+    const name = document.createElement("div");
+    name.textContent = node.name || node.protocol || node.id;
+    name.style.cssText = "color:var(--text-primary);font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;";
+    const detail = document.createElement("div");
+    detail.textContent = `${node.protocol || "协议"} :${node.port || ""}`;
+    detail.style.cssText = "color:var(--text-secondary);font-size:12px;margin-top:3px;";
+    title.append(name, detail);
+    const select = document.createElement("select");
+    select.className = "input-field";
+    select.dataset.nodeId = node.id;
+    const directOption = document.createElement("option");
+    directOption.value = "direct";
+    directOption.textContent = "direct（主机网络）";
+    select.appendChild(directOption);
+    for (const exitConfig of vpnExits) {
+      const option = document.createElement("option");
+      option.value = exitConfig.id;
+      option.textContent = combinationExitLabel(exitConfig);
+      select.appendChild(option);
+    }
+    select.value = node.vpn_exit_id || "direct";
+    if (!Array.from(select.options).some(option => option.value === select.value)) select.value = "direct";
+    row.append(title, select);
+    table.appendChild(row);
+  }
+  if (!singboxNodes.length) {
+    table.textContent = "暂无 sing-box 节点，请先在 sing-box 节点页面新增。";
+  }
+}
+
+async function refreshSingboxCombinations() {
+  try {
+    const res = await fetch("./api/singbox/combinations");
+    const data = await res.json();
+    if (!res.ok || !data.ok) throw new Error(data.error || "读取节点组合失败");
+    singboxNodes = data.nodes || [];
+    vpnExits = data.exits || [];
+    renderSingboxCombinations();
+  } catch (err) {
+    setCombinationMessage("error", err.message || "读取节点组合失败");
+  }
+}
+
+async function openSingboxCombinationsModal() {
+  setCombinationMessage("", "");
+  $("singbox_combinations_modal").style.display = "flex";
+  $("admin_dropdown").style.display = "none";
+  await refreshSingboxCombinations();
+}
+
+function closeSingboxCombinationsModal() {
+  $("singbox_combinations_modal").style.display = "none";
+}
+
+async function saveSingboxCombinations() {
+  const button = $("singbox_combinations_save");
+  const mappings = Array.from($("singbox_combinations_table").querySelectorAll("select[data-node-id]")).map(select => ({
+    node_id: select.dataset.nodeId,
+    vpn_exit_id: select.value || "direct",
+  }));
+  button.disabled = true;
+  setCombinationMessage("", "");
+  try {
+    const res = await fetch("./api/singbox/combinations", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mappings, apply: true }),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.ok) throw new Error(data.error || "保存节点组合失败");
+    singboxNodes = data.nodes || singboxNodes;
+    renderSingboxCombinations();
+    setCombinationMessage("success", data.message || "节点组合已保存并应用");
+    await load();
+  } catch (err) {
+    setCombinationMessage("error", err.message || "保存节点组合失败");
+  } finally {
+    button.disabled = false;
+  }
+}
+
 function fillSingboxForm(settings) {
   $("sb_enabled").checked = !!settings.enabled;
   $("sb_chain_enabled").checked = !!settings.chain_enabled;
@@ -5377,9 +5483,7 @@ function fillSingboxForm(settings) {
   $("sb_password").value = "";
   $("sb_username").value = settings.username || "aimilivpn";
   $("sb_method").value = settings.method || "chacha20-ietf-poly1305";
-  populateSingboxExitSelect(settings.vpn_exit_id || "default");
   toggleSingboxProtocolFields();
-  refreshSingboxExitDisplay();
 }
 
 function renderSingboxNodeSelect() {
@@ -5457,7 +5561,6 @@ function collectSingboxNode() {
     public_key: $("sb_public_key").value.trim(),
     username: $("sb_username").value.trim(),
     method: $("sb_method").value,
-    vpn_exit_id: $("sb_vpn_exit").value || "default"
   };
   const privateKey = $("sb_private_key").value.trim();
   if (privateKey) node.private_key = privateKey;
@@ -5480,7 +5583,7 @@ function addSingboxNode() {
     id, name: "新协议节点", enabled: true, chain_enabled: true, protocol: "vless-reality",
     listen: "0.0.0.0", port, public_host: $("sb_public_host").value.trim(), uuid: "",
     server_name: "www.cloudflare.com", short_id: "", private_key: "", public_key: "",
-    password: "", method: "chacha20-ietf-poly1305", username: "aimilivpn", vpn_exit_id: "default"
+    password: "", method: "chacha20-ietf-poly1305", username: "aimilivpn", vpn_exit_id: "direct"
   };
   singboxNodes.push(node);
   selectedSingboxNodeId = id;
@@ -5566,7 +5669,7 @@ function toggleSingboxProtocolFields() {
 function renderSingboxRuntime(runtime) {
   const statusEl = $("singbox_runtime_status");
   if (!runtime.installed) {
-    statusEl.textContent = "未安装。安装后会自动生成 VLESS-REALITY -> VPNGate 本地 HTTP 配置。";
+    statusEl.textContent = "未安装。安装后可提供 sing-box 协议入口，默认使用主机网络。";
     return;
   }
   const service = runtime.running ? "服务运行中" : "服务已停止";
@@ -5579,14 +5682,10 @@ async function openSingboxModal() {
   $("singbox_modal").style.display = "flex";
   $("admin_dropdown").style.display = "none";
   try {
-    const [configRes, statusRes, exitsRes] = await Promise.all([fetch("./api/singbox/config"), fetch("./api/singbox/status"), fetch("./api/vpn-exits")]);
+    const [configRes, statusRes] = await Promise.all([fetch("./api/singbox/config"), fetch("./api/singbox/status")]);
     const configData = await configRes.json();
     const statusData = await statusRes.json();
-    const exitsData = await exitsRes.json();
     if (!configRes.ok || !configData.ok) throw new Error(configData.error || "读取 sing-box 配置失败");
-    if (!exitsRes.ok || !exitsData.ok) throw new Error(exitsData.error || "读取 VPN 出口失败");
-    vpnExits = exitsData.exits || [];
-    vpnExitNodes = exitsData.nodes || [];
     singboxNodes = configData.nodes || [];
     if (!singboxNodes.length) throw new Error("未找到协议节点");
     selectedSingboxNodeId = selectedSingboxNodeId && singboxNodes.some(node => node.id === selectedSingboxNodeId) ? selectedSingboxNodeId : singboxNodes[0].id;
@@ -6263,6 +6362,12 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json({"ok": True, "data": singbox_api_status()})
         elif effective_path == "/api/singbox/config":
             self.send_json({"ok": True, "nodes": [singbox_manager.redact_settings(node) for node in current_singbox_nodes()]})
+        elif effective_path == "/api/singbox/combinations":
+            self.send_json({
+                "ok": True,
+                "nodes": [singbox_manager.redact_settings(node) for node in current_singbox_nodes()],
+                "exits": [vpn_exit_status(item) for item in current_vpn_exits()],
+            })
         elif effective_path == "/api/vpn-exits":
             selectable_nodes = []
             for node in read_nodes():
@@ -6393,9 +6498,9 @@ class Handler(BaseHTTPRequestHandler):
                 "error": singbox_runtime.get("config_error", "")
             }
             proxy_chain_status = {
-                "name": "sing-box -> VPNGate 代理链",
+                "name": "sing-box 出站",
                 "status": "running" if singbox_runtime.get("chain_ready") else "stopped",
-                "details": f"SOCKS5 127.0.0.1:{LOCAL_PROXY_PORT} -> tun0",
+                "details": "按节点组合使用主机网络或 VPNGate 出口",
                 "error": singbox_runtime.get("chain_error", "")
             }
             self.send_json({
@@ -6634,7 +6739,7 @@ class Handler(BaseHTTPRequestHandler):
                         action_result = singbox_manager.service_action("stop")
                 self.send_json({
                     "ok": True,
-                    "message": "sing-box 代理链配置已保存" + ("并已应用" if action_result else ""),
+                    "message": "sing-box 节点配置已保存" + ("并已应用" if action_result else ""),
                     "nodes": [singbox_manager.redact_settings(node) for node in saved],
                     "exits": [vpn_exit_status(item) for item in exits],
                     "status": action_result,
@@ -6642,8 +6747,59 @@ class Handler(BaseHTTPRequestHandler):
             except (ValueError, singbox_manager.SingBoxError) as exc:
                 self.send_json({"ok": False, "error": str(exc)}, HTTPStatus.BAD_REQUEST)
             except Exception as exc:
-                log_to_json("ERROR", "SingBox", f"保存代理链配置失败: {exc}")
-                self.send_json({"ok": False, "error": "保存 sing-box 代理链配置失败"}, HTTPStatus.INTERNAL_SERVER_ERROR)
+                log_to_json("ERROR", "SingBox", f"保存 sing-box 节点失败: {exc}")
+                self.send_json({"ok": False, "error": "保存 sing-box 节点失败"}, HTTPStatus.INTERNAL_SERVER_ERROR)
+            return
+
+        if effective_path == "/api/singbox/combinations":
+            try:
+                payload = self.read_json_body()
+                mappings = payload.get("mappings", [])
+                if not isinstance(mappings, list):
+                    raise ValueError("节点组合必须是数组")
+                ui_cfg = load_ui_config()
+                exits = current_vpn_exits(ui_cfg)
+                exit_ids = {"direct", *(item["id"] for item in exits)}
+                existing = {str(item.get("id")): item for item in current_singbox_nodes(ui_cfg)}
+                settings = [dict(node) for node in existing.values()]
+                settings_by_id = {str(item.get("id")): item for item in settings}
+                for mapping in mappings:
+                    if not isinstance(mapping, dict):
+                        raise ValueError("节点组合格式无效")
+                    node_id = str(mapping.get("node_id") or "").strip()
+                    exit_id = str(mapping.get("vpn_exit_id") or "direct").strip()
+                    if node_id not in settings_by_id:
+                        raise ValueError("组合中包含不存在的 sing-box 节点")
+                    if exit_id not in exit_ids:
+                        raise ValueError("组合中包含不存在的 VPNGate 出口")
+                    settings_by_id[node_id]["vpn_exit_id"] = exit_id
+                settings = bind_singbox_nodes_to_vpn_exits(settings, exits)
+                proxy_port = bounded_int(ui_cfg.get("proxy_port"), LOCAL_PROXY_PORT, 1024, 65535)
+                saved = singbox_manager.save_nodes(
+                    settings,
+                    proxy_port,
+                    {bounded_int(ui_cfg.get("port"), UI_PORT, 1, 65535), proxy_port},
+                    {item["proxy_port"] for item in exits},
+                )
+                ui_cfg["singbox"]["nodes"] = saved
+                ui_cfg["singbox"].update(saved[0])
+                save_ui_config(ui_cfg)
+                action_result = None
+                if payload.get("apply", True):
+                    action_result = singbox_manager.service_action(
+                        "reload" if any(node["enabled"] and node["chain_enabled"] for node in saved) else "stop"
+                    )
+                self.send_json({
+                    "ok": True,
+                    "message": "节点组合已保存" + ("并已应用" if action_result else ""),
+                    "nodes": [singbox_manager.redact_settings(node) for node in saved],
+                    "status": action_result,
+                })
+            except (ValueError, singbox_manager.SingBoxError) as exc:
+                self.send_json({"ok": False, "error": str(exc)}, HTTPStatus.BAD_REQUEST)
+            except Exception as exc:
+                log_to_json("ERROR", "SingBox", f"保存节点组合失败: {exc}")
+                self.send_json({"ok": False, "error": "保存节点组合失败"}, HTTPStatus.INTERNAL_SERVER_ERROR)
             return
 
         if effective_path == "/api/singbox/regenerate":
@@ -6689,7 +6845,7 @@ class Handler(BaseHTTPRequestHandler):
                     ui_cfg["singbox"].update(saved[0])
                     save_ui_config(ui_cfg)
                     result = singbox_manager.service_action("restart")
-                    self.send_json({"ok": True, "message": "sing-box 已安装并接入 VPNGate 代理链", "status": result})
+                    self.send_json({"ok": True, "message": "sing-box 已安装，默认节点使用主机网络", "status": result})
                 elif action == "validate":
                     ui_cfg = load_ui_config()
                     settings = current_singbox_nodes(ui_cfg)

@@ -239,9 +239,9 @@ def default_settings(proxy_port: int) -> dict[str, Any]:
         "password": secrets.token_urlsafe(18),
         "method": "chacha20-ietf-poly1305",
         "username": "aimilivpn",
-        # VPNGate exposes the local egress as an HTTP proxy.  This is an
-        # internal implementation detail, not a user-configurable upstream.
-        "vpn_exit_id": "default",
+        # New sing-box nodes use the host network until a combination explicitly
+        # assigns a VPNGate exit.
+        "vpn_exit_id": "direct",
         "local_http_port": proxy_port,
         "last_apply_at": 0,
         "last_error": "",
@@ -331,28 +331,31 @@ def normalize_settings(
     if protocol == "shadowsocks" and base["method"] not in SS_METHODS:
         raise SingBoxError("Shadowsocks 加密方式不受支持")
 
-    # Only a locally managed VPNGate HTTP listener can be used as egress.
-    # This deliberately leaves no route for a direct fallback or arbitrary
-    # upstream proxy.
+    # A direct node does not use local_http_port. VPNGate-bound nodes are
+    # restricted to ports registered by the AimiliVPN exit manager.
+    base["vpn_exit_id"] = str(base.get("vpn_exit_id") or "direct").strip()
     allowed_ports = allowed_proxy_ports or {proxy_port}
     try:
         local_http_port = int(base.get("local_http_port", proxy_port))
     except (TypeError, ValueError) as exc:
         raise SingBoxError("VPNGate 出口端口无效") from exc
-    if local_http_port not in allowed_ports:
+    if base["vpn_exit_id"] != "direct" and local_http_port not in allowed_ports:
         raise SingBoxError("所选 VPNGate 出口不存在或不可用")
     base["local_http_port"] = local_http_port
-    base["vpn_exit_id"] = str(base.get("vpn_exit_id") or "default").strip()
     return base
 
 
 def build_proxy_chain_config(settings: dict[str, Any]) -> dict[str, Any]:
-    http_outbound: dict[str, Any] = {
-        "type": "http",
-        "tag": "vpngate-chain",
-        "server": "127.0.0.1",
-        "server_port": settings["local_http_port"],
-    }
+    is_direct = str(settings.get("vpn_exit_id") or "direct") == "direct"
+    egress_tag = "direct" if is_direct else "vpngate-chain"
+    egress_outbound: dict[str, Any] = {"type": "direct", "tag": egress_tag}
+    if not is_direct:
+        egress_outbound = {
+            "type": "http",
+            "tag": egress_tag,
+            "server": "127.0.0.1",
+            "server_port": settings["local_http_port"],
+        }
 
     protocol = settings["protocol"]
     inbound: dict[str, Any] = {
@@ -411,8 +414,8 @@ def build_proxy_chain_config(settings: dict[str, Any]) -> dict[str, Any]:
     return {
         "log": {"level": "warn", "timestamp": True},
         "inbounds": [inbound],
-        "outbounds": [http_outbound, {"type": "block", "tag": "block"}],
-        "route": {"final": "vpngate-chain"},
+        "outbounds": [egress_outbound, {"type": "block", "tag": "block"}],
+        "route": {"final": egress_tag},
     }
 
 
@@ -512,17 +515,22 @@ def build_proxy_chain_nodes(nodes: list[dict[str, Any]]) -> dict[str, Any]:
     rules: list[dict[str, Any]] = []
     outbound_tags: dict[int, str] = {}
     for node in active_nodes:
+        is_direct = str(node.get("vpn_exit_id") or "direct") == "direct"
         port = node["local_http_port"]
-        outbound_tag = outbound_tags.get(port)
+        outbound_key = -1 if is_direct else port
+        outbound_tag = outbound_tags.get(outbound_key)
         if outbound_tag is None:
-            outbound_tag = f"vpngate-chain-{port}"
-            outbound_tags[port] = outbound_tag
-            outbounds.append({
-                "type": "http",
-                "tag": outbound_tag,
-                "server": "127.0.0.1",
-                "server_port": port,
-            })
+            outbound_tag = "direct" if is_direct else f"vpngate-chain-{port}"
+            outbound_tags[outbound_key] = outbound_tag
+            outbounds.append(
+                {"type": "direct", "tag": outbound_tag}
+                if is_direct else {
+                    "type": "http",
+                    "tag": outbound_tag,
+                    "server": "127.0.0.1",
+                    "server_port": port,
+                }
+            )
         inbound = build_proxy_chain_config(node)["inbounds"][0]
         inbound_tag = f"aimilivpn-{node['id']}"
         inbound["tag"] = inbound_tag

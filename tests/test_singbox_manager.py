@@ -8,7 +8,7 @@ import vpngate_manager
 
 
 class SingBoxManagerTests(unittest.TestCase):
-    def test_proxy_chain_never_has_direct_fallback(self):
+    def test_new_proxy_chain_defaults_to_host_network(self):
         settings = singbox_manager.default_settings(7928)
         settings.update({
             "private_key": "private-key",
@@ -18,15 +18,14 @@ class SingBoxManagerTests(unittest.TestCase):
         normalized = singbox_manager.normalize_settings(settings, 7928, {8787, 7928})
         config = singbox_manager.build_proxy_chain_config(normalized)
 
-        self.assertEqual(config["route"]["final"], "vpngate-chain")
-        self.assertEqual(config["outbounds"][0]["type"], "http")
-        self.assertEqual(config["outbounds"][0]["server"], "127.0.0.1")
-        self.assertEqual(config["outbounds"][0]["server_port"], 7928)
-        self.assertNotIn("direct", [item["type"] for item in config["outbounds"]])
+        self.assertEqual(config["route"]["final"], "direct")
+        self.assertEqual(config["outbounds"][0]["type"], "direct")
+        self.assertNotIn("server", config["outbounds"][0])
 
     def test_proxy_chain_forces_local_http_port(self):
         settings = singbox_manager.default_settings(7928)
         settings.update({"private_key": "private-key", "public_key": "public-key"})
+        settings["vpn_exit_id"] = "default"
 
         # Obsolete upstream settings must not be able to redirect egress.
         settings["upstream_host"] = "198.51.100.8"
@@ -96,6 +95,7 @@ class SingBoxManagerTests(unittest.TestCase):
             settings = singbox_manager.default_settings(7928)
             settings["protocol"] = protocol
             settings["port"] = 4500
+            settings["vpn_exit_id"] = "default"
             if protocol == "vless-reality":
                 settings.update({"private_key": "private-key", "public_key": "public-key"})
             normalized = singbox_manager.normalize_settings(settings, 7928, {8787, 7928})
@@ -110,6 +110,7 @@ class SingBoxManagerTests(unittest.TestCase):
         for index, protocol in enumerate(("vless", "shadowsocks", "tuic")):
             node = singbox_manager.new_node(7928, protocol)
             node["port"] = 4500 + index
+            node["vpn_exit_id"] = "default"
             nodes.append(node)
 
         normalized = singbox_manager.normalize_nodes(nodes, 7928, {8787, 7928})
@@ -123,7 +124,7 @@ class SingBoxManagerTests(unittest.TestCase):
 
     def test_multiple_vpn_exits_get_separate_outbounds(self):
         first = singbox_manager.new_node(7928, "vless")
-        first.update({"id": "default-node", "port": 4500})
+        first.update({"id": "default-node", "port": 4500, "vpn_exit_id": "default"})
         second = singbox_manager.new_node(7928, "shadowsocks")
         second.update({"id": "japan-node", "port": 4501, "local_http_port": 7929, "vpn_exit_id": "japan"})
 
@@ -175,6 +176,13 @@ class VpnExitTests(unittest.TestCase):
                 [{"id": "client", "vpn_exit_id": "missing"}],
                 [{"id": "default", "proxy_port": 7928}],
             )
+
+    def test_bind_allows_direct_without_vpngate_exit(self):
+        bound = vpngate_manager.bind_singbox_nodes_to_vpn_exits(
+            [{"id": "client", "vpn_exit_id": "direct", "local_http_port": 7928}],
+            [],
+        )
+        self.assertEqual(bound[0]["vpn_exit_id"], "direct")
 
     def test_service_action_reports_immediate_exit(self):
         with patch.object(singbox_manager, "_service_manager", return_value="openrc"), \

@@ -60,11 +60,11 @@ bash <(curl -Ls https://raw.githubusercontent.com/xiumuzidiao0/aimili-vpngate/ma
 #### 第三步：使用本机代理 (核心步骤)
 为了防止代理端口暴露至公网被恶意扫描和滥用，AimiliVPN 的双效代理服务（默认端口 **`7928`**，自适应支持 SOCKS5 和 HTTP 协议）**默认仅绑定在本地回环地址（`127.0.0.1`）**，只接收 VPS 本机上的流量，不对外机提供代理。
 
-### 🔗 sing-box 代理链
+### 🔗 sing-box 节点与组合
 
-安装脚本会一并部署 sing-box。登录 Web UI 后，打开“管理员 -> sing-box 代理链”，即可安装/检查服务、生成 VLESS-REALITY 凭据、设置公网入口端口和客户端服务器地址。客户端地址默认自动填入服务器公网 IP，也可改为自己的域名。链路固定为：
+安装脚本会一并部署 sing-box。登录 Web UI 后，在“管理员 -> sing-box 节点”中独立管理协议节点，在“管理员 -> VPN 出口”中管理 VPNGate 出口，再通过“管理员 -> 节点组合”选择每个 sing-box 节点使用主机网络或哪个 VPNGate 出口。客户端地址默认自动填入服务器公网 IP，也可改为自己的域名。
 
-当前 Web UI 支持将多个协议节点同时加入、编辑、删除和启停：VLESS-REALITY、VLESS、VMess、Trojan、Shadowsocks、SOCKS5、HTTP、TUIC、Hysteria2、AnyTLS。每个节点都有独立端口和复制链接按钮。
+当前 Web UI 支持将多个协议节点同时加入、编辑、删除和启停：VLESS-REALITY、VLESS、VMess、Trojan、Shadowsocks、SOCKS5、HTTP、TUIC、Hysteria2、AnyTLS。每个节点都有独立端口和复制链接按钮，新节点默认走主机网络。
 
 ```text
 VLESS-REALITY 客户端 -> sing-box -> 127.0.0.1:7928 -> OpenVPN tun0 -> VPNGate 节点
@@ -195,11 +195,11 @@ Open your browser and navigate to the printed URL (e.g. `http://your_vps_ip:8787
 #### Step 3: Use Localhost Proxy (Core Step)
 To prevent unauthorized scanning and abuse of the proxy port on the public internet, the built-in HTTP/SOCKS5 proxy server (default port **`7928`**) **binds to localhost (`127.0.0.1`) by default**. It is designed to route traffic generated locally on the VPS, rather than acting as a public proxy server.
 
-### 🔗 sing-box Proxy Chain
+### 🔗 sing-box Nodes and Combinations
 
-The installer also deploys sing-box. In the Web UI, open `Admin -> sing-box Proxy Chain` to install/check the service, generate VLESS-REALITY credentials, choose the public inbound port, and set the client-facing hostname. The server public IP is filled in automatically and can be replaced with a domain name.
+The installer also deploys sing-box. In the Web UI, use `Admin -> sing-box Nodes` for protocol CRUD, `Admin -> VPN Exits` for VPNGate exits, and `Admin -> Node Combinations` to choose host networking or a VPNGate exit for each sing-box node. The server public IP is filled in automatically and can be replaced with a domain name.
 
-The Web UI can add, edit, delete, and enable multiple protocol nodes at the same time: VLESS-REALITY, VLESS, VMess, Trojan, Shadowsocks, SOCKS5, HTTP, TUIC, Hysteria2, and AnyTLS. Each node has its own port and copy-link control.
+The Web UI can add, edit, delete, and enable multiple protocol nodes at the same time: VLESS-REALITY, VLESS, VMess, Trojan, Shadowsocks, SOCKS5, HTTP, TUIC, Hysteria2, and AnyTLS. Each node has its own port and copy-link control, and new nodes use the host network by default.
 
 ```text
 VLESS-REALITY client -> sing-box -> 127.0.0.1:7928 -> OpenVPN tun0 -> VPNGate node
