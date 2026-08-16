@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import ipaddress
 import base64
 import os
 import re
@@ -224,6 +225,10 @@ def _as_port(value: Any, field: str, forbidden_ports: set[int]) -> int:
 
 def _clean_server_name(value: Any, field: str) -> str:
     name = str(value or "").strip()
+    try:
+        return str(ipaddress.ip_address(name.strip("[]")))
+    except ValueError:
+        pass
     if not SERVER_NAME_RE.fullmatch(name):
         raise SingBoxError(f"{field} 必须是有效域名或 IP 地址")
     return name

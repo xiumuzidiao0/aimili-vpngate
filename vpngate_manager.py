@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import base64
 import csv
+import ipaddress
 import json
 import os
 import queue
@@ -15,6 +16,7 @@ import subprocess
 import threading
 import time
 import urllib.parse
+import urllib.error
 import urllib.request
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -130,6 +132,8 @@ STATE_FILE = DATA_DIR / "state.json"
 AUTH_FILE = DATA_DIR / "vpngate_auth.txt"
 UPSTREAM_PROXY_AUTH_FILE = DATA_DIR / "upstream_proxy_auth.txt"
 BLACKLIST_FILE = DATA_DIR / "blacklist.json"
+PUBLIC_IP_FILE = DATA_DIR / "public_ip.txt"
+PUBLIC_IP_ENDPOINTS = ("https://api.ipify.org", "https://api64.ipify.org")
 
 lock = threading.RLock()
 maintenance_lock = threading.Lock()
@@ -170,6 +174,38 @@ def upstream_proxy_auth_file() -> str | None:
     except Exception as exc:
         print(f"[上游代理认证] 写入认证文件失败: {exc}", flush=True)
         return None
+
+
+def public_ip_address(value: Any) -> str:
+    """Return a globally routable IP address, or an empty string."""
+    try:
+        address = ipaddress.ip_address(str(value or "").strip())
+    except ValueError:
+        return ""
+    return str(address) if address.is_global else ""
+
+
+def detect_public_ip() -> str:
+    """Use the installer cache first, then make a short best-effort lookup."""
+    try:
+        cached = public_ip_address(PUBLIC_IP_FILE.read_text(encoding="utf-8"))
+        if cached:
+            return cached
+    except OSError:
+        pass
+
+    for endpoint in PUBLIC_IP_ENDPOINTS:
+        try:
+            request = urllib.request.Request(endpoint, headers={"User-Agent": "AimiliVPN/1.0"})
+            with urllib.request.urlopen(request, timeout=2) as response:
+                address = public_ip_address(response.read(128).decode("ascii", errors="ignore"))
+            if address:
+                DATA_DIR.mkdir(exist_ok=True, parents=True)
+                PUBLIC_IP_FILE.write_text(address, encoding="utf-8")
+                return address
+        except (OSError, ValueError, urllib.error.URLError):
+            continue
+    return ""
 
 def write_json(path: Path, data: Any) -> None:
     with lock:
@@ -290,6 +326,11 @@ def load_ui_config() -> dict[str, Any]:
         for key, value in default_singbox.items():
             if key not in config["singbox"]:
                 config["singbox"][key] = value
+                updated = True
+        if not str(config["singbox"].get("public_host") or "").strip():
+            public_ip = detect_public_ip()
+            if public_ip:
+                config["singbox"]["public_host"] = public_ip
                 updated = True
         if config["singbox"].get("local_http_port") != normalized_proxy_port:
             config["singbox"]["local_http_port"] = normalized_proxy_port
@@ -3530,7 +3571,7 @@ INDEX_HTML = r"""<!doctype html>
           <div class="form-group" style="margin-bottom:12px;"><label class="form-label" for="sb_listen">公网监听地址</label><select id="sb_listen" class="input-field"><option value="0.0.0.0">IPv4 (0.0.0.0)</option><option value="::">IPv4 + IPv6 (::)</option></select></div>
           <div class="form-group" style="margin-bottom:12px;"><label class="form-label" for="sb_port">公网入口端口</label><input id="sb_port" type="number" class="input-field" min="1" max="65535" required></div>
         </div>
-        <div class="form-group" style="margin-bottom:12px;"><label class="form-label" for="sb_public_host">客户端服务器地址或域名</label><input id="sb_public_host" type="text" class="input-field" placeholder="例如 vps.example.com 或服务器公网 IP"></div>
+        <div class="form-group" style="margin-bottom:12px;"><label class="form-label" for="sb_public_host">客户端服务器地址或域名</label><input id="sb_public_host" type="text" class="input-field" placeholder="自动填入服务器公网 IP，也可填写域名"></div>
         <div id="sb_reality_fields" style="border-top:1px dashed rgba(255,255,255,0.08);padding-top:14px;margin-top:6px;">
           <div style="font-size:13px;color:var(--text-primary);font-weight:600;margin-bottom:12px;">VLESS-REALITY 凭据</div>
           <div class="form-group" style="margin-bottom:12px;"><label class="form-label" for="sb_uuid">UUID</label><div style="display:flex;gap:8px;"><input id="sb_uuid" type="text" class="input-field" required><button type="button" class="connect-btn" onclick="regenerateSingbox('uuid')">生成</button></div></div>
