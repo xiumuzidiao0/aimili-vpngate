@@ -241,6 +241,7 @@ def default_settings(proxy_port: int) -> dict[str, Any]:
         "username": "aimilivpn",
         # VPNGate exposes the local egress as an HTTP proxy.  This is an
         # internal implementation detail, not a user-configurable upstream.
+        "vpn_exit_id": "default",
         "local_http_port": proxy_port,
         "last_apply_at": 0,
         "last_error": "",
@@ -276,7 +277,12 @@ def _as_bool(value: Any, field: str) -> bool:
     raise SingBoxError(f"{field} 必须是布尔值")
 
 
-def normalize_settings(raw: dict[str, Any], proxy_port: int, forbidden_ports: set[int]) -> dict[str, Any]:
+def normalize_settings(
+    raw: dict[str, Any],
+    proxy_port: int,
+    forbidden_ports: set[int],
+    allowed_proxy_ports: set[int] | None = None,
+) -> dict[str, Any]:
     base = default_settings(proxy_port)
     for key in base:
         if key in raw:
@@ -325,9 +331,18 @@ def normalize_settings(raw: dict[str, Any], proxy_port: int, forbidden_ports: se
     if protocol == "shadowsocks" and base["method"] not in SS_METHODS:
         raise SingBoxError("Shadowsocks 加密方式不受支持")
 
-    # Always use VPNGate's local HTTP listener.  Ignore obsolete upstream
-    # fields from earlier releases so a reinstall upgrades existing configs.
-    base["local_http_port"] = proxy_port
+    # Only a locally managed VPNGate HTTP listener can be used as egress.
+    # This deliberately leaves no route for a direct fallback or arbitrary
+    # upstream proxy.
+    allowed_ports = allowed_proxy_ports or {proxy_port}
+    try:
+        local_http_port = int(base.get("local_http_port", proxy_port))
+    except (TypeError, ValueError) as exc:
+        raise SingBoxError("VPNGate 出口端口无效") from exc
+    if local_http_port not in allowed_ports:
+        raise SingBoxError("所选 VPNGate 出口不存在或不可用")
+    base["local_http_port"] = local_http_port
+    base["vpn_exit_id"] = str(base.get("vpn_exit_id") or "default").strip()
     return base
 
 
@@ -457,7 +472,12 @@ def new_node(proxy_port: int, protocol: str = "vless-reality") -> dict[str, Any]
     return settings
 
 
-def normalize_nodes(raw_nodes: Any, proxy_port: int, forbidden_ports: set[int]) -> list[dict[str, Any]]:
+def normalize_nodes(
+    raw_nodes: Any,
+    proxy_port: int,
+    forbidden_ports: set[int],
+    allowed_proxy_ports: set[int] | None = None,
+) -> list[dict[str, Any]]:
     if not isinstance(raw_nodes, list) or not raw_nodes:
         raise SingBoxError("至少需要保留一个 sing-box 协议节点")
     if len(raw_nodes) > 32:
@@ -472,7 +492,7 @@ def normalize_nodes(raw_nodes: Any, proxy_port: int, forbidden_ports: set[int]) 
         node_id = str(raw.get("id") or secrets.token_hex(6)).strip()
         if not re.fullmatch(r"[a-zA-Z0-9_-]{4,40}", node_id) or node_id in node_ids:
             raise SingBoxError("协议节点 ID 无效或重复")
-        normalized = normalize_settings(raw, proxy_port, used_ports)
+        normalized = normalize_settings(raw, proxy_port, used_ports, allowed_proxy_ports)
         normalized["id"] = node_id
         normalized["name"] = str(raw.get("name") or PROTOCOL_LABELS[normalized["protocol"]]).strip()[:80]
         if not normalized["name"]:
@@ -487,15 +507,43 @@ def build_proxy_chain_nodes(nodes: list[dict[str, Any]]) -> dict[str, Any]:
     active_nodes = [node for node in nodes if node["enabled"] and node["chain_enabled"]]
     if not active_nodes:
         raise SingBoxError("至少需要启用一个协议节点")
-    config = build_proxy_chain_config(active_nodes[0])
-    config["inbounds"] = [build_proxy_chain_config(node)["inbounds"][0] for node in active_nodes]
-    for inbound, node in zip(config["inbounds"], active_nodes):
-        inbound["tag"] = f"aimilivpn-{node['id']}"
-    return config
+    inbounds: list[dict[str, Any]] = []
+    outbounds: list[dict[str, Any]] = []
+    rules: list[dict[str, Any]] = []
+    outbound_tags: dict[int, str] = {}
+    for node in active_nodes:
+        port = node["local_http_port"]
+        outbound_tag = outbound_tags.get(port)
+        if outbound_tag is None:
+            outbound_tag = f"vpngate-chain-{port}"
+            outbound_tags[port] = outbound_tag
+            outbounds.append({
+                "type": "http",
+                "tag": outbound_tag,
+                "server": "127.0.0.1",
+                "server_port": port,
+            })
+        inbound = build_proxy_chain_config(node)["inbounds"][0]
+        inbound_tag = f"aimilivpn-{node['id']}"
+        inbound["tag"] = inbound_tag
+        inbounds.append(inbound)
+        rules.append({"inbound": [inbound_tag], "outbound": outbound_tag})
+    outbounds.append({"type": "block", "tag": "block"})
+    return {
+        "log": {"level": "warn", "timestamp": True},
+        "inbounds": inbounds,
+        "outbounds": outbounds,
+        "route": {"rules": rules, "final": "block"},
+    }
 
 
-def save_nodes(raw_nodes: Any, proxy_port: int, forbidden_ports: set[int]) -> list[dict[str, Any]]:
-    nodes = normalize_nodes(raw_nodes, proxy_port, forbidden_ports)
+def save_nodes(
+    raw_nodes: Any,
+    proxy_port: int,
+    forbidden_ports: set[int],
+    allowed_proxy_ports: set[int] | None = None,
+) -> list[dict[str, Any]]:
+    nodes = normalize_nodes(raw_nodes, proxy_port, forbidden_ports, allowed_proxy_ports)
     if any(node["protocol"] in TLS_PROTOCOLS for node in nodes):
         ensure_tls_keypair()
     config = build_proxy_chain_nodes(nodes)

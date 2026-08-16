@@ -84,7 +84,7 @@ def check_credentials(username: str | None, password: str | None) -> bool:
         return True
     return secrets.compare_digest(username or "", expected_user) and secrets.compare_digest(password or "", expected_pass)
 
-def dns_query_over_tun0(host: str, qtype: int, dns_server: str, timeout: float) -> str | None:
+def dns_query_over_interface(host: str, qtype: int, dns_server: str, timeout: float, interface: str) -> str | None:
     import random
     sock = None
     try:
@@ -109,7 +109,7 @@ def dns_query_over_tun0(host: str, qtype: int, dns_server: str, timeout: float) 
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.settimeout(timeout)
         try:
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, b"tun0")
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, interface.encode())
         except OSError as e:
             if "operation not permitted" in str(e).lower() or e.errno == 1:
                 print("[DNS 绑定失败] [错误代码 3006] DNS 解析绑定 tun0 权限不足，请确保程序以 root 权限运行！", flush=True)
@@ -178,7 +178,7 @@ def dns_query_over_tun0(host: str, qtype: int, dns_server: str, timeout: float) 
         return None
     return None
 
-def resolve_dns_over_tun0(host: str, dns_server: str = "8.8.8.8", timeout: float = 3.0) -> str | None:
+def resolve_dns_over_interface(host: str, dns_server: str = "8.8.8.8", timeout: float = 3.0, interface: str = "tun0") -> str | None:
     try:
         socket.inet_aton(host)
         return host
@@ -189,11 +189,11 @@ def resolve_dns_over_tun0(host: str, dns_server: str = "8.8.8.8", timeout: float
         return host
     except OSError:
         pass
-    return dns_query_over_tun0(host, 1, dns_server, timeout) or dns_query_over_tun0(host, 28, dns_server, timeout)
+    return dns_query_over_interface(host, 1, dns_server, timeout, interface) or dns_query_over_interface(host, 28, dns_server, timeout, interface)
 
-def create_connection(address: tuple[str, int], timeout: float = 20) -> socket.socket:
+def create_connection(address: tuple[str, int], timeout: float = 20, interface: str = "tun0") -> socket.socket:
     host, port = address
-    resolved_ip = resolve_dns_over_tun0(host)
+    resolved_ip = resolve_dns_over_interface(host, interface=interface)
     if resolved_ip:
         host = resolved_ip
 
@@ -204,7 +204,7 @@ def create_connection(address: tuple[str, int], timeout: float = 20) -> socket.s
         try:
             sock = socket.socket(af, socktype, proto)
             sock.settimeout(timeout)
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, b"tun0")
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, interface.encode())
             sock.connect(sa)
             return sock
         except OSError as e:
@@ -233,7 +233,7 @@ def relay(left: socket.socket, right: socket.socket) -> None:
                 return
             target.sendall(data)
 
-def socks5_client(client: socket.socket, first_byte: bytes) -> None:
+def socks5_client(client: socket.socket, first_byte: bytes, interface: str = "tun0") -> None:
     upstream = None
     try:
         methods_count = recv_exact(client, 1)[0]
@@ -270,7 +270,7 @@ def socks5_client(client: socket.socket, first_byte: bytes) -> None:
             return
         port = int.from_bytes(recv_exact(client, 2), "big")
         try:
-            upstream = create_connection((host, port), timeout=20)
+            upstream = create_connection((host, port), timeout=20, interface=interface)
         except Exception as e:
             print(f"[SOCKS5 代理失败] 目标 {host}:{port} 连接失败: {e}", flush=True)
             try:
@@ -294,7 +294,7 @@ def read_http_header(client: socket.socket, first_byte: bytes) -> bytes:
         data += chunk
     return data
 
-def http_client(client: socket.socket, first_byte: bytes) -> None:
+def http_client(client: socket.socket, first_byte: bytes, interface: str = "tun0") -> None:
     upstream = None
     try:
         header = read_http_header(client, first_byte)
@@ -322,7 +322,7 @@ def http_client(client: socket.socket, first_byte: bytes) -> None:
                 return
         if method.upper() == "CONNECT":
             host, port = parse_host_port(target, 443)
-            upstream = create_connection((host, port), timeout=20)
+            upstream = create_connection((host, port), timeout=20, interface=interface)
             client.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
             if rest:
                 upstream.sendall(rest)
@@ -361,7 +361,7 @@ def http_client(client: socket.socket, first_byte: bytes) -> None:
         path = urllib.parse.urlunsplit(("", "", parsed.path or "/", parsed.query, ""))
         headers = [line for line in lines[1:] if not line.lower().startswith(("proxy-connection:", "connection:", "proxy-authorization:"))]
         request = f"{method} {path} {version}\r\n" + "\r\n".join(headers) + "\r\nConnection: close\r\n\r\n"
-        upstream = create_connection((hostname, port), timeout=20)
+        upstream = create_connection((hostname, port), timeout=20, interface=interface)
         upstream.sendall(request.encode("iso-8859-1") + rest)
         relay(client, upstream)
     except Exception as e:
@@ -375,14 +375,14 @@ def http_client(client: socket.socket, first_byte: bytes) -> None:
         if upstream:
             upstream.close()
 
-def proxy_client(client: socket.socket, address: tuple[str, int]) -> None:
+def proxy_client(client: socket.socket, address: tuple[str, int], interface: str = "tun0") -> None:
     try:
         client.settimeout(30)
         first = recv_exact(client, 1)
         if first == b"\x05":
-            socks5_client(client, first)
+            socks5_client(client, first, interface)
         else:
-            http_client(client, first)
+            http_client(client, first, interface)
     except Exception as e:
         err_msg = str(e)
         if "[错误代码" in err_msg:
@@ -392,7 +392,12 @@ def proxy_client(client: socket.socket, address: tuple[str, int]) -> None:
         except OSError:
             pass
 
-def start_proxy_server(host: str, port: int) -> None:
+def start_proxy_server(
+    host: str,
+    port: int,
+    interface: str = "tun0",
+    stop_event: threading.Event | None = None,
+) -> None:
     is_ipv6 = ":" in host or host == ""
     af = socket.AF_INET6 if is_ipv6 else socket.AF_INET
     server = None
@@ -406,7 +411,8 @@ def start_proxy_server(host: str, port: int) -> None:
                 pass
         server.bind((host, port))
         server.listen(256)
-        print(f"HTTP/SOCKS5 proxy listening on {host}:{port}", flush=True)
+        server.settimeout(1.0)
+        print(f"HTTP/SOCKS5 proxy listening on {host}:{port} via {interface}", flush=True)
     except Exception as e:
         if server is not None:
             try:
@@ -420,6 +426,7 @@ def start_proxy_server(host: str, port: int) -> None:
                 server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
                 server.bind(("0.0.0.0", port))
                 server.listen(256)
+                server.settimeout(1.0)
                 print(f"HTTP/SOCKS5 proxy listening on 0.0.0.0:{port} (仅 IPv4)", flush=True)
             except Exception as ex:
                 import vpn_utils
@@ -434,6 +441,7 @@ def start_proxy_server(host: str, port: int) -> None:
                 server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
                 server.bind(("127.0.0.1", port))
                 server.listen(256)
+                server.settimeout(1.0)
                 print(f"HTTP/SOCKS5 proxy listening on 127.0.0.1:{port} (仅 IPv4)", flush=True)
             except Exception as ex:
                 import vpn_utils
@@ -448,7 +456,7 @@ def start_proxy_server(host: str, port: int) -> None:
             print(f"[ERROR] Failed to start HTTP/SOCKS5 proxy on {host}:{port}: {diag_msg}", flush=True)
             return
 
-    while True:
+    while stop_event is None or not stop_event.is_set():
         try:
             client, address = server.accept()
             if not proxy_connection_sem.acquire(blocking=False):
@@ -461,11 +469,17 @@ def start_proxy_server(host: str, port: int) -> None:
 
             def run_client() -> None:
                 try:
-                    proxy_client(client, address)
+                    proxy_client(client, address, interface)
                 finally:
                     proxy_connection_sem.release()
 
             threading.Thread(target=run_client, daemon=True).start()
+        except socket.timeout:
+            continue
         except Exception as e:
             print(f"[ERROR] Proxy accept failed: {e}", flush=True)
             time.sleep(0.5)
+    try:
+        server.close()
+    except OSError:
+        pass

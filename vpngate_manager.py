@@ -140,6 +140,10 @@ maintenance_lock = threading.Lock()
 active_sessions: dict[str, float] = {}
 active_openvpn_process: subprocess.Popen[str] | None = None
 active_openvpn_node_id = ""
+vpn_exit_processes: dict[str, subprocess.Popen[str]] = {}
+vpn_exit_lock = threading.RLock()
+vpn_exit_proxy_ports: set[int] = set()
+vpn_exit_proxy_stops: dict[str, threading.Event] = {}
 is_connecting = False
 last_active_ping_time = 0.0
 last_active_latency = 0
@@ -265,6 +269,7 @@ def load_ui_config() -> dict[str, Any]:
             "fixed_node_id": "",
             "favorite_node_ids": [],
             "fav_fail_fallback": False,
+            "vpn_exits": [],
             "singbox": {
                 "enabled": False,
                 "chain_enabled": False,
@@ -319,6 +324,12 @@ def load_ui_config() -> dict[str, Any]:
 
         if not isinstance(config.get("singbox"), dict):
             config["singbox"] = {}
+            updated = True
+        if not isinstance(config.get("vpn_exits"), list) or not config["vpn_exits"]:
+            config["vpn_exits"] = [{
+                "id": "default", "name": "默认出口", "node_id": "", "proxy_port": normalized_proxy_port,
+                "tun_name": "tun0", "enabled": True,
+            }]
             updated = True
         default_singbox = singbox_manager.default_settings(normalized_proxy_port)
         default_singbox["enabled"] = False
@@ -504,10 +515,211 @@ def current_singbox_nodes(ui_cfg: dict[str, Any] | None = None) -> list[dict[str
     legacy["name"] = "默认节点"
     return [legacy]
 
+
+def current_vpn_exits(ui_cfg: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    ui_cfg = ui_cfg or load_ui_config()
+    raw_exits = ui_cfg.get("vpn_exits", [])
+    if not isinstance(raw_exits, list):
+        raw_exits = []
+    used_ports: set[int] = set()
+    exits: list[dict[str, Any]] = []
+    default_raw = next((item for item in raw_exits if isinstance(item, dict) and item.get("id") == "default"), None)
+    ordered = ([default_raw] if default_raw else []) + [
+        item for item in raw_exits if item is not default_raw
+    ]
+    extra_index = 1
+    for raw in ordered:
+        if not isinstance(raw, dict):
+            continue
+        exit_id = str(raw.get("id") or "").strip()
+        if not re.fullmatch(r"[a-zA-Z0-9_-]{3,32}", exit_id) or any(item["id"] == exit_id for item in exits):
+            continue
+        port = bounded_int(raw.get("proxy_port"), LOCAL_PROXY_PORT + extra_index - 1, 1024, 65535)
+        if port in used_ports:
+            continue
+        is_default = exit_id == "default"
+        tun_name = "tun0" if is_default else f"tun{extra_index}"
+        exits.append({
+            "id": exit_id,
+            "name": str(raw.get("name") or exit_id).strip()[:64] or exit_id,
+            "node_id": str(raw.get("node_id") or "").strip(),
+            "proxy_port": port,
+            "tun_name": tun_name,
+            "route_table": 100 if is_default else 100 + extra_index,
+            "enabled": bool(raw.get("enabled", True)),
+        })
+        used_ports.add(port)
+        if not is_default:
+            extra_index += 1
+    return exits
+
+
+def vpn_exit_status(exit_config: dict[str, Any]) -> dict[str, Any]:
+    exit_id = exit_config["id"]
+    if exit_id == "default":
+        running = active_openvpn_running()
+        node_id = active_openvpn_node_id
+    else:
+        process = vpn_exit_processes.get(exit_id)
+        running = process is not None and process.poll() is None
+        node_id = exit_config.get("node_id", "")
+    return {**exit_config, "running": running, "active_node_id": node_id}
+
+
+def start_vpn_exit_proxy(exit_config: dict[str, Any]) -> None:
+    """Start the loopback-only HTTP/SOCKS listener for an extra VPN exit."""
+    if exit_config["id"] == "default":
+        return
+    proxy_port = exit_config["proxy_port"]
+    with vpn_exit_lock:
+        if exit_config["id"] in vpn_exit_proxy_stops:
+            return
+        stop_event = threading.Event()
+        vpn_exit_proxy_ports.add(proxy_port)
+        vpn_exit_proxy_stops[exit_config["id"]] = stop_event
+    threading.Thread(
+        target=proxy_server.start_proxy_server,
+        args=("127.0.0.1", proxy_port, exit_config["tun_name"], stop_event),
+        daemon=True,
+    ).start()
+
+
+def stop_vpn_exit_proxy(exit_id: str, proxy_port: int) -> None:
+    with vpn_exit_lock:
+        stop_event = vpn_exit_proxy_stops.pop(exit_id, None)
+        if stop_event is not None:
+            stop_event.set()
+        vpn_exit_proxy_ports.discard(proxy_port)
+
+
+def normalize_vpn_exits(raw_exits: Any, ui_cfg: dict[str, Any]) -> list[dict[str, Any]]:
+    if not isinstance(raw_exits, list):
+        raise ValueError("VPN 出口列表必须是数组")
+    if len(raw_exits) > 8:
+        raise ValueError("VPN 出口数量不能超过 8 个")
+
+    default_port = bounded_int(ui_cfg.get("proxy_port"), LOCAL_PROXY_PORT, 1024, 65535)
+    node_ids = {str(item.get("id")) for item in read_nodes() if item.get("id")}
+    singbox_ports = {parse_int(item.get("port")) for item in current_singbox_nodes(ui_cfg)}
+    ui_port = bounded_int(ui_cfg.get("port"), UI_PORT, 1, 65535)
+    incoming_by_id: dict[str, dict[str, Any]] = {}
+    for raw in raw_exits:
+        if not isinstance(raw, dict):
+            raise ValueError("VPN 出口格式无效")
+        exit_id = str(raw.get("id") or "").strip()
+        if not re.fullmatch(r"[a-zA-Z0-9_-]{3,32}", exit_id) or exit_id in incoming_by_id:
+            raise ValueError("VPN 出口 ID 无效或重复")
+        incoming_by_id[exit_id] = raw
+
+    default_raw = incoming_by_id.pop("default", {})
+    default_node_id = str(default_raw.get("node_id") or "").strip()
+    if default_node_id and default_node_id not in node_ids:
+        raise ValueError("默认出口选择的 VPNGate 节点不存在")
+    normalized = [{
+        "id": "default",
+        "name": "默认出口",
+        "node_id": default_node_id,
+        "proxy_port": default_port,
+        "tun_name": "tun0",
+        "enabled": True,
+    }]
+    used_ports = {default_port}
+    for exit_id, raw in incoming_by_id.items():
+        try:
+            proxy_port = int(raw.get("proxy_port"))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("VPN 出口本地端口无效") from exc
+        if not 1024 <= proxy_port <= 65535:
+            raise ValueError("VPN 出口本地端口必须在 1024 至 65535 之间")
+        if proxy_port in used_ports or proxy_port == ui_port or proxy_port in singbox_ports:
+            raise ValueError("VPN 出口本地端口与已有服务冲突")
+        node_id = str(raw.get("node_id") or "").strip()
+        if node_id and node_id not in node_ids:
+            raise ValueError("VPN 出口选择的 VPNGate 节点不存在")
+        normalized.append({
+            "id": exit_id,
+            "name": str(raw.get("name") or exit_id).strip()[:64] or exit_id,
+            "node_id": node_id,
+            "proxy_port": proxy_port,
+            "tun_name": "",
+            "enabled": bool(raw.get("enabled", True)),
+        })
+        used_ports.add(proxy_port)
+    return normalized
+
+
+def bind_singbox_nodes_to_vpn_exits(raw_nodes: list[dict[str, Any]], exits: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    exits_by_id = {item["id"]: item for item in exits}
+    bound_nodes: list[dict[str, Any]] = []
+    for raw in raw_nodes:
+        exit_id = str(raw.get("vpn_exit_id") or "default").strip()
+        exit_config = exits_by_id.get(exit_id)
+        if not exit_config:
+            raise singbox_manager.SingBoxError("协议节点选择的 VPN 出口不存在")
+        node = dict(raw)
+        node["vpn_exit_id"] = exit_id
+        node["local_http_port"] = exit_config["proxy_port"]
+        bound_nodes.append(node)
+    return bound_nodes
+
+
+def start_vpn_exit(exit_id: str) -> dict[str, Any]:
+    exit_config = next((item for item in current_vpn_exits() if item["id"] == exit_id), None)
+    if not exit_config:
+        raise ValueError("未找到 VPN 出口")
+    if not exit_config.get("enabled"):
+        raise ValueError("该 VPN 出口已禁用")
+    if exit_id == "default":
+        if not exit_config["node_id"]:
+            raise ValueError("请先为默认出口选择 VPNGate 节点")
+        connect_node(exit_config["node_id"])
+        return vpn_exit_status(exit_config)
+    if not exit_config["node_id"]:
+        raise ValueError("请先为出口选择 VPNGate 节点")
+    with vpn_exit_lock:
+        existing = vpn_exit_processes.get(exit_id)
+        if existing is not None and existing.poll() is None:
+            return vpn_exit_status(exit_config)
+        node = next((item for item in read_nodes() if item.get("id") == exit_config["node_id"]), None)
+        if not node:
+            raise ValueError("所选 VPNGate 节点不存在，请先刷新节点")
+        config_path = CONFIG_DIR / f"exit-{safe_name(exit_id)}.ovpn"
+        CONFIG_DIR.mkdir(exist_ok=True, parents=True)
+        config_path.write_text(node.get("config_text") or "", encoding="utf-8")
+        ok, message, process = run_openvpn_until_ready(
+            str(config_path), keep_alive=True, route_nopull=True, dev=exit_config["tun_name"],
+        )
+        if not ok or process is None:
+            config_path.unlink(missing_ok=True)
+            raise RuntimeError(message)
+        vpn_exit_processes[exit_id] = process
+        setup_policy_routing(exit_config["tun_name"], exit_config["route_table"])
+        start_vpn_exit_proxy(exit_config)
+    return vpn_exit_status(exit_config)
+
+
+def stop_vpn_exit(exit_id: str) -> dict[str, Any]:
+    exit_config = next((item for item in current_vpn_exits() if item["id"] == exit_id), None)
+    if not exit_config:
+        raise ValueError("未找到 VPN 出口")
+    if exit_id == "default":
+        stop_active_openvpn()
+    else:
+        with vpn_exit_lock:
+            stop_process(vpn_exit_processes.pop(exit_id, None))
+            cleanup_policy_routing(exit_config["route_table"])
+            stop_vpn_exit_proxy(exit_id, exit_config["proxy_port"])
+            (CONFIG_DIR / f"exit-{safe_name(exit_id)}.ovpn").unlink(missing_ok=True)
+    return vpn_exit_status(exit_config)
+
 def singbox_api_status(ui_cfg: dict[str, Any] | None = None) -> dict[str, Any]:
     ui_cfg = ui_cfg or load_ui_config()
     nodes = current_singbox_nodes(ui_cfg)
-    has_enabled_node = any(node.get("enabled") and node.get("chain_enabled") for node in nodes)
+    enabled_nodes = [node for node in nodes if node.get("enabled") and node.get("chain_enabled")]
+    has_enabled_node = bool(enabled_nodes)
+    exits_by_id = {item["id"]: vpn_exit_status(item) for item in current_vpn_exits(ui_cfg)}
+    required_exits = {str(node.get("vpn_exit_id") or "default") for node in enabled_nodes}
+    missing_exits = [exit_id for exit_id in required_exits if not exits_by_id.get(exit_id, {}).get("running")]
     try:
         runtime = singbox_manager.status()
     except Exception as exc:
@@ -523,12 +735,12 @@ def singbox_api_status(ui_cfg: dict[str, Any] | None = None) -> dict[str, Any]:
     chain_ready = bool(
         has_enabled_node
         and runtime.get("running")
-        and active_openvpn_running()
+        and not missing_exits
     )
     runtime["chain_ready"] = chain_ready
     runtime["chain_error"] = "" if chain_ready else (
         "代理链未启用" if not has_enabled_node
-        else "等待 sing-box 服务或 VPNGate OpenVPN 出口就绪"
+        else "等待 sing-box 服务或所选 VPNGate 出口就绪"
     )
     runtime["nodes"] = [singbox_manager.redact_settings(node) for node in nodes]
     return runtime
@@ -1236,21 +1448,21 @@ def run_openvpn_until_ready(config_file: str, keep_alive: bool, route_nopull: bo
     return ok, message, process
 
 
-def setup_policy_routing(interface: str = "tun0") -> None:
+def setup_policy_routing(interface: str = "tun0", table: int = 100) -> None:
     try:
-        subprocess.run(["ip", "rule", "del", "table", "100"], capture_output=True, timeout=2)
+        subprocess.run(["ip", "rule", "del", "table", str(table)], capture_output=True, timeout=2)
     except Exception:
         pass
     try:
-        subprocess.run(["ip", "route", "flush", "table", "100"], capture_output=True, timeout=2)
+        subprocess.run(["ip", "route", "flush", "table", str(table)], capture_output=True, timeout=2)
     except Exception:
         pass
     
     success = False
     for attempt in range(1, 4):
         try:
-            subprocess.run(["ip", "route", "add", "default", "dev", interface, "table", "100"], check=True, timeout=2)
-            subprocess.run(["ip", "rule", "add", "oif", interface, "table", "100"], check=True, timeout=2)
+            subprocess.run(["ip", "route", "add", "default", "dev", interface, "table", str(table)], check=True, timeout=2)
+            subprocess.run(["ip", "rule", "add", "oif", interface, "table", str(table)], check=True, timeout=2)
             # 配置反向路径过滤 rp_filter 为 loose 模式 (2)，防止回包被内核静默丢弃
             for proc_path in ["all", "default", interface]:
                 try:
@@ -1268,11 +1480,11 @@ def setup_policy_routing(interface: str = "tun0") -> None:
         print("[路由配置失败] [错误代码 3003] [ERR_ROUTE_TABLE_ADD_FAILED] 策略路由配置失败。原因: 无法向路由表 100 添加默认路由，这可能会导致通过 VPN 接口的出站路由无法正常解析。请检查系统是否支持策略路由、iproute2 工具是否完整，以及是否具有 root 权限。", flush=True)
         log_to_json("ERROR", "Routing", "[错误代码 3003] [ERR_ROUTE_TABLE_ADD_FAILED] 策略路由配置失败。原因: 无法向路由表 100 添加默认路由")
 
-def cleanup_policy_routing() -> None:
+def cleanup_policy_routing(table: int = 100) -> None:
     try:
-        subprocess.run(["ip", "rule", "del", "table", "100"], capture_output=True, timeout=2)
-        subprocess.run(["ip", "route", "flush", "table", "100"], capture_output=True, timeout=2)
-        print("[policy_routing] Cleared policy routing table 100", flush=True)
+        subprocess.run(["ip", "rule", "del", "table", str(table)], capture_output=True, timeout=2)
+        subprocess.run(["ip", "route", "flush", "table", str(table)], capture_output=True, timeout=2)
+        print(f"[policy_routing] Cleared policy routing table {table}", flush=True)
     except Exception:
         pass
 
@@ -1290,7 +1502,6 @@ def stop_active_openvpn() -> None:
         stop_process(active_openvpn_process)
         active_openvpn_process = None
         active_openvpn_node_id = ""
-        kill_existing_openvpn_processes()
         
         if config_to_delete:
             try:
@@ -1758,6 +1969,10 @@ def connect_node(node_id: str) -> str:
         ui_cfg = load_ui_config()
         validate_node_allowed_by_routing(node, ui_cfg)
         ui_cfg["connection_enabled"] = True
+        exits = current_vpn_exits(ui_cfg)
+        if exits:
+            exits[0]["node_id"] = node_id
+            ui_cfg["vpn_exits"] = exits
         if ui_cfg.get("routing_mode") == "fixed_ip":
             ui_cfg["fixed_node_id"] = node_id
         auth_file = DATA_DIR / "ui_auth.json"
@@ -3338,6 +3553,10 @@ INDEX_HTML = r"""<!doctype html>
           <svg xmlns="http://www.w3.org/2000/svg" style="width:14px; height:14px;" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 7h16M4 12h16M4 17h10" /></svg>
           sing-box 代理链
         </a>
+        <a href="javascript:void(0)" onclick="openVpnExitsModal()">
+          <svg xmlns="http://www.w3.org/2000/svg" style="width:14px; height:14px;" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M3 7h18M6 3v4m12-4v4M5 11h14v8H5z" /></svg>
+          VPN 出口
+        </a>
         <a href="javascript:void(0)" onclick="openGatewayModal()">
           <svg xmlns="http://www.w3.org/2000/svg" style="width:14px; height:14px;" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" /></svg>
           网关设置
@@ -3605,6 +3824,7 @@ INDEX_HTML = r"""<!doctype html>
           <div class="form-group" style="margin-bottom:12px;"><label class="form-label" for="sb_port">公网入口端口</label><input id="sb_port" type="number" class="input-field" min="1" max="65535" required></div>
         </div>
         <div class="form-group" style="margin-bottom:12px;"><label class="form-label" for="sb_public_host">客户端服务器地址或域名</label><input id="sb_public_host" type="text" class="input-field" placeholder="自动填入服务器公网 IP，也可填写域名"></div>
+        <div class="form-group" style="margin-bottom:12px;"><label class="form-label" for="sb_vpn_exit">目标 VPN 出口</label><select id="sb_vpn_exit" class="input-field" onchange="refreshSingboxExitDisplay()"></select></div>
         <div id="sb_reality_fields" style="border-top:1px dashed rgba(255,255,255,0.08);padding-top:14px;margin-top:6px;">
           <div style="font-size:13px;color:var(--text-primary);font-weight:600;margin-bottom:12px;">VLESS-REALITY 凭据</div>
           <div class="form-group" style="margin-bottom:12px;"><label class="form-label" for="sb_uuid">UUID</label><div style="display:flex;gap:8px;"><input id="sb_uuid" type="text" class="input-field" required><button type="button" class="connect-btn" onclick="regenerateSingbox('uuid')">生成</button></div></div>
@@ -3631,6 +3851,28 @@ INDEX_HTML = r"""<!doctype html>
         <button type="button" class="connect-btn" style="margin-bottom:16px;" onclick="loadSingboxClientInfo()">刷新客户端连接地址</button>
         <div id="sb_node_links" style="display:grid;gap:8px;margin-bottom:16px;"></div>
         <div style="display:flex;gap:12px;justify-content:flex-end;"><button type="button" onclick="closeSingboxModal()" style="height:40px;padding:0 16px;font-weight:600;border-radius:8px;border:1px solid var(--border-color);background:transparent;color:var(--text-secondary);cursor:pointer;">取消</button><button type="submit" id="singbox_submit_btn" class="btn-primary" style="height:40px;padding:0 20px;font-weight:600;border-radius:8px;">保存并应用</button></div>
+      </form>
+    </div>
+  </div>
+
+  <!-- VPN exit modal -->
+  <div id="vpn_exits_modal" class="modal">
+    <div class="modal-content" style="max-width:720px;width:94%;max-height:88vh;overflow-y:auto;">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:18px;">
+        <div><h3 style="margin:0;font-size:18px;color:var(--text-primary);">VPN 出口</h3><div style="font-size:12px;color:var(--text-secondary);margin-top:5px;">每个出口使用独立本地端口与 VPNGate 隧道。</div></div>
+        <button type="button" onclick="closeVpnExitsModal()" title="关闭" style="background:transparent;border:none;padding:4px;cursor:pointer;color:var(--text-secondary);width:28px;height:28px;">&#10005;</button>
+      </div>
+      <div id="vpn_exits_error" style="color:var(--danger);font-size:13px;margin-bottom:12px;padding:8px 12px;background:rgba(244,63,94,0.1);border:1px solid rgba(244,63,94,0.2);border-radius:6px;display:none;"></div>
+      <div id="vpn_exits_success" style="color:var(--success);font-size:13px;margin-bottom:12px;padding:8px 12px;background:rgba(16,185,129,0.1);border:1px solid rgba(16,185,129,0.2);border-radius:6px;display:none;"></div>
+      <div id="vpn_exit_table" style="margin-bottom:16px;border:1px solid var(--border-color);border-radius:6px;overflow:hidden;"></div>
+      <form id="vpn_exit_form" onsubmit="saveVpnExits(event)">
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+          <div class="form-group" style="margin-bottom:12px;"><label class="form-label" for="ve_name">出口名称</label><input id="ve_name" class="input-field" maxlength="64" required></div>
+          <div class="form-group" style="margin-bottom:12px;"><label class="form-label" for="ve_port">本地 HTTP 端口</label><input id="ve_port" type="number" class="input-field" min="1024" max="65535" required></div>
+        </div>
+        <div class="form-group" style="margin-bottom:12px;"><label class="form-label" for="ve_node">VPNGate 节点</label><select id="ve_node" class="input-field"></select></div>
+        <label class="form-label" style="display:flex;align-items:center;gap:8px;margin:0 0 16px;"><input id="ve_enabled" type="checkbox" checked> 启用此出口</label>
+        <div style="display:flex;gap:8px;justify-content:flex-end;"><button type="button" class="connect-btn" onclick="addVpnExit()">新增出口</button><button type="submit" class="btn-primary" id="vpn_exit_submit_btn">保存出口配置</button></div>
       </form>
     </div>
   </div>
@@ -4860,6 +5102,212 @@ function setSingboxMessage(type, message) {
 
 let singboxNodes = [];
 let selectedSingboxNodeId = "";
+let vpnExits = [];
+let vpnExitNodes = [];
+let selectedVpnExitId = "default";
+
+function setVpnExitMessage(type, message) {
+  const errorEl = $("vpn_exits_error");
+  const successEl = $("vpn_exits_success");
+  errorEl.style.display = "none";
+  successEl.style.display = "none";
+  if (!message) return;
+  const target = type === "error" ? errorEl : successEl;
+  target.textContent = message;
+  target.style.display = "block";
+}
+
+function vpnExitLabel(exitConfig) {
+  if (!exitConfig) return "默认出口";
+  return `${exitConfig.name || exitConfig.id} (127.0.0.1:${exitConfig.proxy_port})`;
+}
+
+function populateVpnExitNodeSelect(nodeId) {
+  const select = $("ve_node");
+  select.innerHTML = '<option value="">选择 VPNGate 节点</option>';
+  for (const node of vpnExitNodes) {
+    const option = document.createElement("option");
+    option.value = node.id;
+    option.textContent = [node.name, node.country, node.ip].filter(Boolean).join(" · ");
+    select.appendChild(option);
+  }
+  select.value = nodeId || "";
+}
+
+function populateSingboxExitSelect(exitId) {
+  const select = $("sb_vpn_exit");
+  if (!select) return;
+  select.innerHTML = "";
+  for (const exitConfig of vpnExits) {
+    const option = document.createElement("option");
+    option.value = exitConfig.id;
+    option.textContent = vpnExitLabel(exitConfig) + (exitConfig.running ? "" : " (未连接)");
+    select.appendChild(option);
+  }
+  select.value = vpnExits.some(item => item.id === exitId) ? exitId : "default";
+}
+
+function refreshSingboxExitDisplay() {
+  const exitConfig = vpnExits.find(item => item.id === $("sb_vpn_exit").value) || vpnExits.find(item => item.id === "default");
+  const port = exitConfig ? exitConfig.proxy_port : ((state && state.proxy_port) || 7928);
+  const tun = exitConfig ? exitConfig.tun_name : "tun0";
+  $("sb_upstream_display").textContent = `HTTP 127.0.0.1:${port} -> ${tun} -> VPNGate`;
+}
+
+function selectedVpnExit() {
+  return vpnExits.find(item => item.id === selectedVpnExitId) || vpnExits[0] || null;
+}
+
+function fillVpnExitForm(exitConfig) {
+  if (!exitConfig) return;
+  selectedVpnExitId = exitConfig.id;
+  $("ve_name").value = exitConfig.name || exitConfig.id;
+  $("ve_port").value = exitConfig.proxy_port || 7928;
+  $("ve_enabled").checked = exitConfig.enabled !== false;
+  const isDefault = exitConfig.id === "default";
+  $("ve_name").disabled = isDefault;
+  $("ve_port").disabled = isDefault;
+  $("ve_enabled").disabled = isDefault;
+  populateVpnExitNodeSelect(exitConfig.node_id);
+}
+
+function collectVpnExit() {
+  const previous = selectedVpnExit();
+  if (!previous) return null;
+  return {
+    ...previous,
+    name: $("ve_name").value.trim(),
+    proxy_port: parseInt($("ve_port").value, 10),
+    node_id: $("ve_node").value,
+    enabled: $("ve_enabled").checked
+  };
+}
+
+function renderVpnExitTable() {
+  const table = $("vpn_exit_table");
+  table.innerHTML = "";
+  for (const exitConfig of vpnExits) {
+    const row = document.createElement("div");
+    row.style.cssText = "display:grid;grid-template-columns:minmax(100px,1fr) minmax(120px,1.2fr) 84px auto;gap:8px;align-items:center;padding:9px 10px;border-bottom:1px solid var(--border-color);font-size:12px;";
+    const name = document.createElement("span");
+    name.textContent = `${exitConfig.name || exitConfig.id} ${exitConfig.running ? "(运行中)" : "(已停止)"}`;
+    name.style.color = exitConfig.running ? "var(--success)" : "var(--text-primary)";
+    const node = document.createElement("span");
+    const source = vpnExitNodes.find(item => item.id === exitConfig.node_id);
+    node.textContent = source ? (source.name || source.country || source.id) : (exitConfig.node_id || "未选择节点");
+    node.style.cssText = "overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-secondary);";
+    const port = document.createElement("span");
+    port.textContent = `127.0.0.1:${exitConfig.proxy_port}`;
+    port.style.color = "var(--text-secondary)";
+    const actions = document.createElement("span");
+    actions.style.cssText = "display:flex;gap:5px;justify-content:flex-end;";
+    for (const [label, handler, danger] of [
+      ["编辑", () => { fillVpnExitForm(exitConfig); renderVpnExitTable(); }, false],
+      [exitConfig.running ? "停止" : "启动", () => vpnExitAction(exitConfig.id, exitConfig.running ? "stop" : "start"), false],
+      ["删除", () => deleteVpnExit(exitConfig.id), true]
+    ]) {
+      if (label === "删除" && exitConfig.id === "default") continue;
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = danger ? "test-btn" : "connect-btn";
+      button.textContent = label;
+      button.onclick = handler;
+      actions.appendChild(button);
+    }
+    row.append(name, node, port, actions);
+    table.appendChild(row);
+  }
+}
+
+function addVpnExit() {
+  const current = collectVpnExit();
+  const currentIndex = vpnExits.findIndex(item => item.id === selectedVpnExitId);
+  if (current && currentIndex >= 0) vpnExits[currentIndex] = current;
+  const usedPorts = new Set(vpnExits.map(item => Number(item.proxy_port)));
+  let port = 7929;
+  while (usedPorts.has(port)) port += 1;
+  const id = `exit${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`.slice(0, 32);
+  const exitConfig = { id, name: "新 VPN 出口", node_id: "", proxy_port: port, enabled: true, running: false };
+  vpnExits.push(exitConfig);
+  fillVpnExitForm(exitConfig);
+  renderVpnExitTable();
+}
+
+function deleteVpnExit(exitId) {
+  const exitConfig = vpnExits.find(item => item.id === exitId);
+  if (!exitConfig || exitId === "default") return;
+  vpnExits = vpnExits.filter(item => item.id !== exitId);
+  selectedVpnExitId = "default";
+  fillVpnExitForm(selectedVpnExit());
+  renderVpnExitTable();
+}
+
+async function saveVpnExits(event) {
+  event.preventDefault();
+  const current = collectVpnExit();
+  const currentIndex = vpnExits.findIndex(item => item.id === selectedVpnExitId);
+  if (!current || currentIndex < 0) return;
+  vpnExits[currentIndex] = current;
+  const submit = $("vpn_exit_submit_btn");
+  submit.disabled = true;
+  try {
+    const res = await fetch("./api/vpn-exits/config", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ exits: vpnExits }) });
+    const data = await res.json();
+    if (!res.ok || !data.ok) throw new Error(data.error || "保存 VPN 出口配置失败");
+    vpnExits = data.exits || vpnExits;
+    fillVpnExitForm(selectedVpnExit());
+    renderVpnExitTable();
+    populateSingboxExitSelect($("sb_vpn_exit").value);
+    refreshSingboxExitDisplay();
+    setVpnExitMessage("success", data.message || "VPN 出口配置已保存");
+  } catch (err) {
+    setVpnExitMessage("error", err.message || "保存 VPN 出口配置失败");
+  } finally {
+    submit.disabled = false;
+  }
+}
+
+async function vpnExitAction(id, action) {
+  setVpnExitMessage("", "");
+  try {
+    const res = await fetch("./api/vpn-exits/action", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id, action }) });
+    const data = await res.json();
+    if (!res.ok || !data.ok) throw new Error(data.error || "VPN 出口操作失败");
+    const statusRes = await fetch("./api/vpn-exits");
+    const statusData = await statusRes.json();
+    if (statusRes.ok && statusData.ok) vpnExits = statusData.exits || vpnExits;
+    fillVpnExitForm(selectedVpnExit());
+    renderVpnExitTable();
+    populateSingboxExitSelect($("sb_vpn_exit").value);
+    refreshSingboxExitDisplay();
+    setVpnExitMessage("success", data.message || "VPN 出口操作成功");
+    await load();
+  } catch (err) {
+    setVpnExitMessage("error", err.message || "VPN 出口操作失败");
+  }
+}
+
+async function openVpnExitsModal() {
+  setVpnExitMessage("", "");
+  $("vpn_exits_modal").style.display = "flex";
+  $("admin_dropdown").style.display = "none";
+  try {
+    const res = await fetch("./api/vpn-exits");
+    const data = await res.json();
+    if (!res.ok || !data.ok) throw new Error(data.error || "读取 VPN 出口失败");
+    vpnExits = data.exits || [];
+    vpnExitNodes = data.nodes || [];
+    selectedVpnExitId = vpnExits.some(item => item.id === selectedVpnExitId) ? selectedVpnExitId : "default";
+    fillVpnExitForm(selectedVpnExit());
+    renderVpnExitTable();
+  } catch (err) {
+    setVpnExitMessage("error", err.message || "读取 VPN 出口失败");
+  }
+}
+
+function closeVpnExitsModal() {
+  $("vpn_exits_modal").style.display = "none";
+}
 
 function fillSingboxForm(settings) {
   $("sb_enabled").checked = !!settings.enabled;
@@ -4876,9 +5324,9 @@ function fillSingboxForm(settings) {
   $("sb_password").value = "";
   $("sb_username").value = settings.username || "aimilivpn";
   $("sb_method").value = settings.method || "chacha20-ietf-poly1305";
+  populateSingboxExitSelect(settings.vpn_exit_id || "default");
   toggleSingboxProtocolFields();
-  const localHttpPort = settings.local_http_port || (state && state.proxy_port) || 7928;
-  $("sb_upstream_display").textContent = `HTTP 127.0.0.1:${localHttpPort} -> tun0 -> VPNGate`;
+  refreshSingboxExitDisplay();
 }
 
 function renderSingboxNodeSelect() {
@@ -4955,7 +5403,8 @@ function collectSingboxNode() {
     short_id: $("sb_short_id").value.trim(),
     public_key: $("sb_public_key").value.trim(),
     username: $("sb_username").value.trim(),
-    method: $("sb_method").value
+    method: $("sb_method").value,
+    vpn_exit_id: $("sb_vpn_exit").value || "default"
   };
   const privateKey = $("sb_private_key").value.trim();
   if (privateKey) node.private_key = privateKey;
@@ -4978,7 +5427,7 @@ function addSingboxNode() {
     id, name: "新协议节点", enabled: true, chain_enabled: true, protocol: "vless-reality",
     listen: "0.0.0.0", port, public_host: $("sb_public_host").value.trim(), uuid: "",
     server_name: "www.cloudflare.com", short_id: "", private_key: "", public_key: "",
-    password: "", method: "chacha20-ietf-poly1305", username: "aimilivpn"
+    password: "", method: "chacha20-ietf-poly1305", username: "aimilivpn", vpn_exit_id: "default"
   };
   singboxNodes.push(node);
   selectedSingboxNodeId = id;
@@ -5077,10 +5526,14 @@ async function openSingboxModal() {
   $("singbox_modal").style.display = "flex";
   $("admin_dropdown").style.display = "none";
   try {
-    const [configRes, statusRes] = await Promise.all([fetch("./api/singbox/config"), fetch("./api/singbox/status")]);
+    const [configRes, statusRes, exitsRes] = await Promise.all([fetch("./api/singbox/config"), fetch("./api/singbox/status"), fetch("./api/vpn-exits")]);
     const configData = await configRes.json();
     const statusData = await statusRes.json();
+    const exitsData = await exitsRes.json();
     if (!configRes.ok || !configData.ok) throw new Error(configData.error || "读取 sing-box 配置失败");
+    if (!exitsRes.ok || !exitsData.ok) throw new Error(exitsData.error || "读取 VPN 出口失败");
+    vpnExits = exitsData.exits || [];
+    vpnExitNodes = exitsData.nodes || [];
     singboxNodes = configData.nodes || [];
     if (!singboxNodes.length) throw new Error("未找到协议节点");
     selectedSingboxNodeId = selectedSingboxNodeId && singboxNodes.some(node => node.id === selectedSingboxNodeId) ? selectedSingboxNodeId : singboxNodes[0].id;
@@ -5757,6 +6210,20 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json({"ok": True, "data": singbox_api_status()})
         elif effective_path == "/api/singbox/config":
             self.send_json({"ok": True, "nodes": [singbox_manager.redact_settings(node) for node in current_singbox_nodes()]})
+        elif effective_path == "/api/vpn-exits":
+            selectable_nodes = []
+            for node in read_nodes():
+                selectable_nodes.append({
+                    "id": node.get("id", ""),
+                    "name": node.get("name") or node.get("country_long") or node.get("country_short") or node.get("id", ""),
+                    "country": node.get("country_long") or node.get("country_short") or "",
+                    "ip": node.get("ip") or node.get("remote_host") or "",
+                })
+            self.send_json({
+                "ok": True,
+                "exits": [vpn_exit_status(item) for item in current_vpn_exits()],
+                "nodes": selectable_nodes,
+            })
         elif effective_path == "/api/singbox/client_info":
             try:
                 requested_id = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query).get("node_id", [""])[0]
@@ -5976,6 +6443,69 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json({"error": "Unauthorized"}, HTTPStatus.UNAUTHORIZED)
             return
 
+        if effective_path == "/api/vpn-exits/config":
+            try:
+                payload = self.read_json_body()
+                ui_cfg = load_ui_config()
+                normalized = normalize_vpn_exits(payload.get("exits"), ui_cfg)
+                old_exits = {item["id"]: item for item in current_vpn_exits(ui_cfg)}
+                candidate_cfg = dict(ui_cfg)
+                candidate_cfg["vpn_exits"] = normalized
+                new_exits = {item["id"]: item for item in current_vpn_exits(candidate_cfg)}
+                referenced_exit_ids = {
+                    str(node.get("vpn_exit_id") or "default") for node in current_singbox_nodes(ui_cfg)
+                }
+                for exit_id in referenced_exit_ids:
+                    old_exit = old_exits.get(exit_id)
+                    new_exit = new_exits.get(exit_id)
+                    if old_exit is None:
+                        continue
+                    if new_exit is None:
+                        raise ValueError("该 VPN 出口仍被 sing-box 节点使用，请先切换协议节点出口")
+                    if old_exit["proxy_port"] != new_exit["proxy_port"]:
+                        raise ValueError("该 VPN 出口仍被 sing-box 节点使用，不能修改本地端口")
+                for exit_id, old_exit in old_exits.items():
+                    if exit_id == "default" or not vpn_exit_status(old_exit)["running"]:
+                        continue
+                    new_exit = new_exits.get(exit_id)
+                    fields = ("node_id", "proxy_port", "tun_name", "route_table", "enabled")
+                    if new_exit is None or any(old_exit[field] != new_exit[field] for field in fields):
+                        stop_vpn_exit(exit_id)
+                ui_cfg["vpn_exits"] = normalized
+                save_ui_config(ui_cfg)
+                self.send_json({
+                    "ok": True,
+                    "message": "VPN 出口配置已保存",
+                    "exits": [vpn_exit_status(item) for item in current_vpn_exits(ui_cfg)],
+                })
+            except ValueError as exc:
+                self.send_json({"ok": False, "error": str(exc)}, HTTPStatus.BAD_REQUEST)
+            except Exception as exc:
+                log_to_json("ERROR", "VPN", f"保存 VPN 出口配置失败: {exc}")
+                self.send_json({"ok": False, "error": "保存 VPN 出口配置失败"}, HTTPStatus.INTERNAL_SERVER_ERROR)
+            return
+
+        if effective_path == "/api/vpn-exits/action":
+            try:
+                payload = self.read_json_body()
+                action = str(payload.get("action") or "").strip().lower()
+                exit_id = str(payload.get("id") or "").strip()
+                if action == "start":
+                    result = start_vpn_exit(exit_id)
+                    message = "VPN 出口已连接"
+                elif action == "stop":
+                    result = stop_vpn_exit(exit_id)
+                    message = "VPN 出口已停止"
+                else:
+                    raise ValueError("不支持的 VPN 出口操作")
+                self.send_json({"ok": True, "message": message, "exit": result})
+            except (ValueError, RuntimeError) as exc:
+                self.send_json({"ok": False, "error": str(exc)}, HTTPStatus.BAD_REQUEST)
+            except Exception as exc:
+                log_to_json("ERROR", "VPN", f"VPN 出口操作失败: {exc}")
+                self.send_json({"ok": False, "error": "VPN 出口操作失败"}, HTTPStatus.INTERNAL_SERVER_ERROR)
+            return
+
         if effective_path == "/api/singbox/preview":
             try:
                 payload = self.read_json_body()
@@ -5987,15 +6517,18 @@ class Handler(BaseHTTPRequestHandler):
                 base = existing or singbox_manager.new_node(LOCAL_PROXY_PORT)
                 allowed_fields = {
                     "id", "name", "enabled", "chain_enabled", "protocol", "listen", "port", "uuid", "server_name",
-                    "short_id", "private_key", "public_key", "public_host", "password", "method", "username"
+                    "short_id", "private_key", "public_key", "public_host", "password", "method", "username", "vpn_exit_id"
                 }
                 settings = {**base, **{key: value for key, value in incoming.items() if key in allowed_fields}}
                 ui_cfg = load_ui_config()
                 proxy_port = bounded_int(ui_cfg.get("proxy_port"), LOCAL_PROXY_PORT, 1024, 65535)
+                exits = current_vpn_exits(ui_cfg)
+                settings = bind_singbox_nodes_to_vpn_exits([settings], exits)[0]
                 normalized = singbox_manager.normalize_settings(
                     settings,
                     proxy_port,
                     {bounded_int(ui_cfg.get("port"), UI_PORT, 1, 65535), proxy_port},
+                    {item["proxy_port"] for item in exits},
                 )
                 self.send_json({"ok": True, "data": singbox_manager.client_info(normalized)})
             except (ValueError, singbox_manager.SingBoxError) as exc:
@@ -6015,7 +6548,7 @@ class Handler(BaseHTTPRequestHandler):
                     raise ValueError("协议节点列表必须是数组")
                 allowed_fields = {
                     "enabled", "chain_enabled", "protocol", "listen", "port", "uuid", "server_name",
-                    "short_id", "private_key", "public_key", "public_host", "password", "method", "username"
+                    "short_id", "private_key", "public_key", "public_host", "password", "method", "username", "vpn_exit_id"
                 }
                 existing = {item.get("id"): item for item in current_singbox_nodes()}
                 settings = []
@@ -6027,7 +6560,11 @@ class Handler(BaseHTTPRequestHandler):
                 ui_cfg = load_ui_config()
                 proxy_port = bounded_int(ui_cfg.get("proxy_port"), LOCAL_PROXY_PORT, 1024, 65535)
                 forbidden_ports = {bounded_int(ui_cfg.get("port"), UI_PORT, 1, 65535), proxy_port}
-                saved = singbox_manager.save_nodes(settings, proxy_port, forbidden_ports)
+                exits = current_vpn_exits(ui_cfg)
+                settings = bind_singbox_nodes_to_vpn_exits(settings, exits)
+                saved = singbox_manager.save_nodes(
+                    settings, proxy_port, forbidden_ports, {item["proxy_port"] for item in exits},
+                )
                 ui_cfg["singbox"]["nodes"] = saved
                 ui_cfg["singbox"].update(saved[0])
                 save_ui_config(ui_cfg)
@@ -6042,6 +6579,7 @@ class Handler(BaseHTTPRequestHandler):
                     "ok": True,
                     "message": "sing-box 代理链配置已保存" + ("并已应用" if action_result else ""),
                     "nodes": [singbox_manager.redact_settings(node) for node in saved],
+                    "exits": [vpn_exit_status(item) for item in exits],
                     "status": action_result,
                 })
             except (ValueError, singbox_manager.SingBoxError) as exc:
@@ -6082,10 +6620,13 @@ class Handler(BaseHTTPRequestHandler):
                         node["enabled"] = True
                         node["chain_enabled"] = True
                     proxy_port = bounded_int(ui_cfg.get("proxy_port"), LOCAL_PROXY_PORT, 1024, 65535)
+                    exits = current_vpn_exits(ui_cfg)
+                    settings = bind_singbox_nodes_to_vpn_exits(settings, exits)
                     saved = singbox_manager.save_nodes(
                         settings,
                         proxy_port,
                         {bounded_int(ui_cfg.get("port"), UI_PORT, 1, 65535), proxy_port},
+                        {item["proxy_port"] for item in exits},
                     )
                     ui_cfg["singbox"]["nodes"] = saved
                     ui_cfg["singbox"].update(saved[0])
@@ -6096,10 +6637,13 @@ class Handler(BaseHTTPRequestHandler):
                     ui_cfg = load_ui_config()
                     settings = current_singbox_nodes(ui_cfg)
                     proxy_port = bounded_int(ui_cfg.get("proxy_port"), LOCAL_PROXY_PORT, 1024, 65535)
+                    exits = current_vpn_exits(ui_cfg)
+                    settings = bind_singbox_nodes_to_vpn_exits(settings, exits)
                     normalized = singbox_manager.normalize_nodes(
                         settings,
                         proxy_port,
                         {bounded_int(ui_cfg.get("port"), UI_PORT, 1, 65535), proxy_port},
+                        {item["proxy_port"] for item in exits},
                     )
                     singbox_manager.validate_config(singbox_manager.build_proxy_chain_nodes(normalized))
                     self.send_json({"ok": True, "message": "sing-box 配置校验通过"})
@@ -6211,19 +6755,34 @@ class Handler(BaseHTTPRequestHandler):
                     return
 
                 if new_proxy_port_int != expected_proxy_port:
+                    raw_exits = current_vpn_exits(ui_cfg)
+                    if any(item["id"] != "default" and item["proxy_port"] == new_proxy_port_int for item in raw_exits):
+                        self.send_json({"ok": False, "error": "默认出口端口不能与其他 VPN 出口重复"}, HTTPStatus.BAD_REQUEST)
+                        return
+                    if new_proxy_port_int in {parse_int(item.get("port")) for item in current_singbox_nodes(ui_cfg)}:
+                        self.send_json({"ok": False, "error": "默认出口端口不能与 sing-box 公网入口端口冲突"}, HTTPStatus.BAD_REQUEST)
+                        return
+                    raw_exits[0]["proxy_port"] = new_proxy_port_int
+                    exit_cfg = dict(ui_cfg)
+                    exit_cfg["proxy_port"] = new_proxy_port_int
+                    exit_cfg["vpn_exits"] = raw_exits
+                    exits = current_vpn_exits(exit_cfg)
                     singbox_settings = current_singbox_nodes(ui_cfg)
+                    singbox_settings = bind_singbox_nodes_to_vpn_exits(singbox_settings, exits)
                     if any(node.get("enabled") and node.get("chain_enabled") for node in singbox_settings):
                         try:
                             singbox_settings = singbox_manager.save_nodes(
                                 singbox_settings,
                                 new_proxy_port_int,
                                 {bounded_int(ui_cfg.get("port"), UI_PORT, 1, 65535), new_proxy_port_int},
+                                {item["proxy_port"] for item in exits},
                             )
                         except singbox_manager.SingBoxError as exc:
                             self.send_json({"ok": False, "error": f"无法同步 sing-box 代理链: {exc}"}, HTTPStatus.BAD_REQUEST)
                             return
                     ui_cfg["singbox"]["nodes"] = singbox_settings
                     ui_cfg["singbox"].update(singbox_settings[0])
+                    ui_cfg["vpn_exits"] = raw_exits
                 
                 ui_cfg["proxy_port"] = new_proxy_port_int
                 ui_cfg["routing_mode"] = routing_mode
@@ -6488,7 +7047,10 @@ class Tee:
         return getattr(self.stdout, attr)
 
 def main() -> None:
+    global LOCAL_PROXY_PORT
     ensure_dirs()
+    startup_cfg = load_ui_config()
+    LOCAL_PROXY_PORT = bounded_int(startup_cfg.get("proxy_port"), LOCAL_PROXY_PORT, 1024, 65535)
     kill_existing_openvpn_processes()
     
     log_file = DATA_DIR / "vpngate.log"
@@ -6512,7 +7074,8 @@ def main() -> None:
             "blacklisted_nodes": 0,
         },
     )
-    threading.Thread(target=proxy_server.start_proxy_server, args=(LOCAL_PROXY_HOST, LOCAL_PROXY_PORT), daemon=True).start()
+    vpn_exit_proxy_ports.add(LOCAL_PROXY_PORT)
+    threading.Thread(target=proxy_server.start_proxy_server, args=(LOCAL_PROXY_HOST, LOCAL_PROXY_PORT, "tun0"), daemon=True).start()
     
     # Wait for the gateway to officially start
     print("[网关] 正在启动代理网关...", flush=True)

@@ -7,7 +7,7 @@ Bilingual: [中文](#中文) | [English](#english)
 <a name="中文"></a>
 ## 中文 (Chinese)
 
-AimiliVPN 是一款基于官方 VPNGate 开放协议的高性能 VPN 代理网关。它提供节点测速、自动切换和 Web 管理，并集成 sing-box 协议入口：外部客户端可通过 VLESS-REALITY 接入，流量固定经由本机 HTTP 代理、OpenVPN `tun0` 和当前 VPNGate 节点出站。
+AimiliVPN 是一款基于官方 VPNGate 开放协议的高性能 VPN 代理网关。它提供节点测速、自动切换和 Web 管理，并集成 sing-box 协议入口：外部客户端可通过多种协议接入，并按节点选择本机 HTTP 代理、OpenVPN 隧道和 VPNGate 出口。
 
 ---
 
@@ -64,13 +64,13 @@ bash <(curl -Ls https://raw.githubusercontent.com/xiumuzidiao0/aimili-vpngate/ma
 
 安装脚本会一并部署 sing-box。登录 Web UI 后，打开“管理员 -> sing-box 代理链”，即可安装/检查服务、生成 VLESS-REALITY 凭据、设置公网入口端口和客户端服务器地址。客户端地址默认自动填入服务器公网 IP，也可改为自己的域名。链路固定为：
 
-当前 Web UI 支持将多个协议节点同时加入、编辑、删除和启停：VLESS-REALITY、VLESS、VMess、Trojan、Shadowsocks、SOCKS5、HTTP、TUIC、Hysteria2、AnyTLS。每个节点都有独立端口和复制链接按钮，所有入口统一经由 AimiliVPN 本地 HTTP 代理和 VPNGate 出口。
+当前 Web UI 支持将多个协议节点同时加入、编辑、删除和启停：VLESS-REALITY、VLESS、VMess、Trojan、Shadowsocks、SOCKS5、HTTP、TUIC、Hysteria2、AnyTLS。每个节点都有独立端口和复制链接按钮。
 
 ```text
 VLESS-REALITY 客户端 -> sing-box -> 127.0.0.1:7928 -> OpenVPN tun0 -> VPNGate 节点
 ```
 
-`7928` 是内部跳点，不需要也不应当在防火墙或安全组中对公网放行；只放行 Web UI 端口和在 sing-box 面板中设置的公网入口端口。VPNGate 节点自动切换后，客户端连接参数保持不变。
+在“管理员 -> VPN 出口”中可增加独立出口，例如 `127.0.0.1:7929 -> tun1 -> VPNGate 美国节点`，然后在 sing-box 节点中选择该出口。因此客户端 A 和 B 可以分别使用不同 VPNGate 国家出口，但不会形成 VPN 到 VPN 的串联。所有 `7928/7929` 类端口均只监听本机回环地址，不需要也不应在防火墙或安全组中对公网放行；只放行 Web UI 端口和 sing-box 公网入口端口。
 
 * **🐍 Python 脚本中使用代理**:
   ```python
@@ -149,7 +149,7 @@ VLESS-REALITY 客户端 -> sing-box -> 127.0.0.1:7928 -> OpenVPN tun0 -> VPNGate
 <a name="english"></a>
 ## English
 
-AimiliVPN is a VPNGate proxy gateway with node benchmarking, automatic switching, a Web UI, and an integrated sing-box protocol entrypoint. External clients can use VLESS-REALITY while all egress remains pinned to the local HTTP proxy, OpenVPN `tun0`, and the active VPNGate node.
+AimiliVPN is a VPNGate proxy gateway with node benchmarking, automatic switching, a Web UI, and an integrated sing-box protocol entrypoint. External clients can use multiple protocols and each inbound can select a managed local HTTP proxy, OpenVPN tunnel, and VPNGate egress.
 
 ### 🌟 Recommended VPS Deals
 [![BandwagonHost Premium Optimized Routes](https://img.shields.io/badge/BandwagonHost-Premium%20Optimized%20Routes-red?style=for-the-badge)](https://bandwagonhost.com/aff.php?aff=81790)
@@ -199,13 +199,13 @@ To prevent unauthorized scanning and abuse of the proxy port on the public inter
 
 The installer also deploys sing-box. In the Web UI, open `Admin -> sing-box Proxy Chain` to install/check the service, generate VLESS-REALITY credentials, choose the public inbound port, and set the client-facing hostname. The server public IP is filled in automatically and can be replaced with a domain name.
 
-The Web UI can add, edit, delete, and enable multiple protocol nodes at the same time: VLESS-REALITY, VLESS, VMess, Trojan, Shadowsocks, SOCKS5, HTTP, TUIC, Hysteria2, and AnyTLS. Each node has its own port and copy-link control, while every inbound uses the AimiliVPN local HTTP proxy and VPNGate egress.
+The Web UI can add, edit, delete, and enable multiple protocol nodes at the same time: VLESS-REALITY, VLESS, VMess, Trojan, Shadowsocks, SOCKS5, HTTP, TUIC, Hysteria2, and AnyTLS. Each node has its own port and copy-link control.
 
 ```text
 VLESS-REALITY client -> sing-box -> 127.0.0.1:7928 -> OpenVPN tun0 -> VPNGate node
 ```
 
-Port `7928` is an internal hop and should not be opened to the public internet. Only allow the Web UI port and the public sing-box inbound port in the firewall/security group. VPNGate node changes do not require any client configuration changes.
+Under `Admin -> VPN Exits`, add an independent exit such as `127.0.0.1:7929 -> tun1 -> VPNGate US node`, then select that exit from a sing-box node. This lets client A and client B use different VPNGate countries without creating a VPN-to-VPN chain. Ports such as `7928` and `7929` are loopback-only internal hops and must not be opened publicly; only expose the Web UI port and public sing-box inbound ports.
 
 * **🐍 Proxy in Python**:
   ```python

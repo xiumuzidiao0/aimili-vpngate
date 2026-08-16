@@ -4,6 +4,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import singbox_manager
+import vpngate_manager
 
 
 class SingBoxManagerTests(unittest.TestCase):
@@ -35,6 +36,25 @@ class SingBoxManagerTests(unittest.TestCase):
         settings["port"] = 8787
         with self.assertRaises(singbox_manager.SingBoxError):
             singbox_manager.normalize_settings(settings, 7928, {8787, 7928})
+
+    def test_proxy_chain_allows_only_registered_vpn_exit_ports(self):
+        settings = singbox_manager.default_settings(7928)
+        settings.update({
+            "private_key": "private-key",
+            "public_key": "public-key",
+            "local_http_port": 7929,
+            "vpn_exit_id": "japan",
+        })
+
+        normalized = singbox_manager.normalize_settings(
+            settings, 7928, {8787, 7928}, {7928, 7929},
+        )
+        self.assertEqual(normalized["local_http_port"], 7929)
+        self.assertEqual(normalized["vpn_exit_id"], "japan")
+
+        settings["local_http_port"] = 18080
+        with self.assertRaises(singbox_manager.SingBoxError):
+            singbox_manager.normalize_settings(settings, 7928, {8787, 7928}, {7928, 7929})
 
     def test_save_config_uses_validated_atomic_output(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -98,7 +118,25 @@ class SingBoxManagerTests(unittest.TestCase):
         self.assertEqual(len(config["inbounds"]), 3)
         self.assertEqual(config["outbounds"][0]["type"], "http")
         self.assertEqual(config["outbounds"][0]["server_port"], 7928)
-        self.assertEqual(config["route"]["final"], "vpngate-chain")
+        self.assertEqual(config["route"]["final"], "block")
+        self.assertEqual(len(config["route"]["rules"]), 3)
+
+    def test_multiple_vpn_exits_get_separate_outbounds(self):
+        first = singbox_manager.new_node(7928, "vless")
+        first.update({"id": "default-node", "port": 4500})
+        second = singbox_manager.new_node(7928, "shadowsocks")
+        second.update({"id": "japan-node", "port": 4501, "local_http_port": 7929, "vpn_exit_id": "japan"})
+
+        normalized = singbox_manager.normalize_nodes(
+            [first, second], 7928, {8787, 7928}, {7928, 7929},
+        )
+        config = singbox_manager.build_proxy_chain_nodes(normalized)
+        http_outbounds = [item for item in config["outbounds"] if item["type"] == "http"]
+        self.assertEqual({item["server_port"] for item in http_outbounds}, {7928, 7929})
+        self.assertEqual(
+            {rule["outbound"] for rule in config["route"]["rules"]},
+            {"vpngate-chain-7928", "vpngate-chain-7929"},
+        )
 
     def test_openrc_reload_maps_to_restart(self):
         with patch.object(singbox_manager, "_service_manager", return_value="openrc"), \
@@ -108,6 +146,33 @@ class SingBoxManagerTests(unittest.TestCase):
             run.return_value.returncode = 0
             singbox_manager.service_action("reload")
             run.assert_called_once_with(["rc-service", "sing-box", "restart"], timeout=30)
+
+
+class VpnExitTests(unittest.TestCase):
+    def test_normalize_exits_and_bind_singbox_nodes(self):
+        ui_config = {"proxy_port": 7928, "port": 8787, "singbox": {"nodes": []}}
+        raw_exits = [
+            {"id": "default", "name": "ignored", "node_id": "japan", "proxy_port": 9999},
+            {"id": "usa", "name": "美国出口", "node_id": "us-node", "proxy_port": 7929, "enabled": True},
+        ]
+        with patch.object(vpngate_manager, "read_nodes", return_value=[{"id": "japan"}, {"id": "us-node"}]):
+            exits = vpngate_manager.normalize_vpn_exits(raw_exits, ui_config)
+
+        self.assertEqual(exits[0]["proxy_port"], 7928)
+        self.assertEqual(exits[0]["name"], "默认出口")
+        self.assertEqual(exits[1]["proxy_port"], 7929)
+        bound = vpngate_manager.bind_singbox_nodes_to_vpn_exits(
+            [{"id": "client-us", "vpn_exit_id": "usa"}],
+            vpngate_manager.current_vpn_exits({**ui_config, "vpn_exits": exits}),
+        )
+        self.assertEqual(bound[0]["local_http_port"], 7929)
+
+    def test_bind_rejects_unknown_exit(self):
+        with self.assertRaises(singbox_manager.SingBoxError):
+            vpngate_manager.bind_singbox_nodes_to_vpn_exits(
+                [{"id": "client", "vpn_exit_id": "missing"}],
+                [{"id": "default", "proxy_port": 7928}],
+            )
 
     def test_service_action_reports_immediate_exit(self):
         with patch.object(singbox_manager, "_service_manager", return_value="openrc"), \
