@@ -152,15 +152,17 @@ class VpnExitTests(unittest.TestCase):
     def test_normalize_exits_and_bind_singbox_nodes(self):
         ui_config = {"proxy_port": 7928, "port": 8787, "singbox": {"nodes": []}}
         raw_exits = [
-            {"id": "default", "name": "ignored", "node_id": "japan", "proxy_port": 9999},
-            {"id": "usa", "name": "美国出口", "node_id": "us-node", "proxy_port": 7929, "enabled": True},
+            {"id": "default", "name": "ignored", "node_id": "japan", "proxy_port": 9999, "country": "日本", "ip_type": "residential"},
+            {"id": "usa", "name": "美国出口", "node_id": "us-node", "proxy_port": 7929, "country": "美国", "ip_type": "hosting", "enabled": True},
         ]
         with patch.object(vpngate_manager, "read_nodes", return_value=[{"id": "japan"}, {"id": "us-node"}]):
             exits = vpngate_manager.normalize_vpn_exits(raw_exits, ui_config)
 
         self.assertEqual(exits[0]["proxy_port"], 7928)
         self.assertEqual(exits[0]["name"], "默认出口")
+        self.assertEqual(exits[0]["ip_type"], "residential")
         self.assertEqual(exits[1]["proxy_port"], 7929)
+        self.assertEqual(exits[1]["country"], "美国")
         bound = vpngate_manager.bind_singbox_nodes_to_vpn_exits(
             [{"id": "client-us", "vpn_exit_id": "usa"}],
             vpngate_manager.current_vpn_exits({**ui_config, "vpn_exits": exits}),

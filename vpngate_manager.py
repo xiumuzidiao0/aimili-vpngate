@@ -543,6 +543,8 @@ def current_vpn_exits(ui_cfg: dict[str, Any] | None = None) -> list[dict[str, An
             "id": exit_id,
             "name": str(raw.get("name") or exit_id).strip()[:64] or exit_id,
             "node_id": str(raw.get("node_id") or "").strip(),
+            "country": str(raw.get("country") or "").strip(),
+            "ip_type": str(raw.get("ip_type") or "all").strip().lower(),
             "proxy_port": port,
             "tun_name": tun_name,
             "route_table": 100 if is_default else 100 + extra_index,
@@ -615,10 +617,15 @@ def normalize_vpn_exits(raw_exits: Any, ui_cfg: dict[str, Any]) -> list[dict[str
     default_node_id = str(default_raw.get("node_id") or "").strip()
     if default_node_id and default_node_id not in node_ids:
         raise ValueError("默认出口选择的 VPNGate 节点不存在")
+    default_ip_type = str(default_raw.get("ip_type") or "all").strip().lower()
+    if default_ip_type not in {"all", "residential", "hosting"}:
+        raise ValueError("VPN 出口 IP 类型无效")
     normalized = [{
         "id": "default",
         "name": "默认出口",
         "node_id": default_node_id,
+        "country": str(default_raw.get("country") or "").strip(),
+        "ip_type": default_ip_type,
         "proxy_port": default_port,
         "tun_name": "tun0",
         "enabled": True,
@@ -631,6 +638,10 @@ def normalize_vpn_exits(raw_exits: Any, ui_cfg: dict[str, Any]) -> list[dict[str
             raise ValueError("VPN 出口本地端口无效") from exc
         if not 1024 <= proxy_port <= 65535:
             raise ValueError("VPN 出口本地端口必须在 1024 至 65535 之间")
+        country = str(raw.get("country") or "").strip()
+        ip_type = str(raw.get("ip_type") or "all").strip().lower()
+        if ip_type not in {"all", "residential", "hosting"}:
+            raise ValueError("VPN 出口 IP 类型无效")
         if proxy_port in used_ports or proxy_port == ui_port or proxy_port in singbox_ports:
             raise ValueError("VPN 出口本地端口与已有服务冲突")
         node_id = str(raw.get("node_id") or "").strip()
@@ -640,6 +651,8 @@ def normalize_vpn_exits(raw_exits: Any, ui_cfg: dict[str, Any]) -> list[dict[str
             "id": exit_id,
             "name": str(raw.get("name") or exit_id).strip()[:64] or exit_id,
             "node_id": node_id,
+            "country": country,
+            "ip_type": ip_type,
             "proxy_port": proxy_port,
             "tun_name": "",
             "enabled": bool(raw.get("enabled", True)),
@@ -3870,6 +3883,10 @@ INDEX_HTML = r"""<!doctype html>
           <div class="form-group" style="margin-bottom:12px;"><label class="form-label" for="ve_name">出口名称</label><input id="ve_name" class="input-field" maxlength="64" required></div>
           <div class="form-group" style="margin-bottom:12px;"><label class="form-label" for="ve_port">本地 HTTP 端口</label><input id="ve_port" type="number" class="input-field" min="1024" max="65535" required></div>
         </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+          <div class="form-group" style="margin-bottom:12px;"><label class="form-label" for="ve_country">国家/地区筛选</label><select id="ve_country" class="input-field" onchange="filterVpnExitNodes()"><option value="">所有国家</option></select></div>
+          <div class="form-group" style="margin-bottom:12px;"><label class="form-label" for="ve_ip_type">IP 类型筛选</label><select id="ve_ip_type" class="input-field" onchange="filterVpnExitNodes()"><option value="all">所有 IP 类型</option><option value="residential">住宅 IP</option><option value="hosting">机房 IP</option></select></div>
+        </div>
         <div class="form-group" style="margin-bottom:12px;"><label class="form-label" for="ve_node">VPNGate 节点</label><select id="ve_node" class="input-field"></select></div>
         <label class="form-label" style="display:flex;align-items:center;gap:8px;margin:0 0 16px;"><input id="ve_enabled" type="checkbox" checked> 启用此出口</label>
         <div style="display:flex;gap:8px;justify-content:flex-end;"><button type="button" class="connect-btn" onclick="addVpnExit()">新增出口</button><button type="submit" class="btn-primary" id="vpn_exit_submit_btn">保存出口配置</button></div>
@@ -5122,16 +5139,48 @@ function vpnExitLabel(exitConfig) {
   return `${exitConfig.name || exitConfig.id} (127.0.0.1:${exitConfig.proxy_port})`;
 }
 
+function populateVpnExitFilters(exitConfig) {
+  const countrySelect = $("ve_country");
+  const selectedCountry = exitConfig ? (exitConfig.country || "") : countrySelect.value;
+  const countries = Array.from(new Set(vpnExitNodes.map(node => translateCountry(node.country)).filter(Boolean))).sort();
+  countrySelect.innerHTML = '<option value="">所有国家</option>' + countries.map(country => `<option value="${esc(country)}">${esc(country)}</option>`).join("");
+  countrySelect.value = countries.includes(selectedCountry) ? selectedCountry : "";
+  const ipType = exitConfig ? (exitConfig.ip_type || "all") : $("ve_ip_type").value;
+  $("ve_ip_type").value = ["all", "residential", "hosting"].includes(ipType) ? ipType : "all";
+}
+
+function filteredVpnExitNodes() {
+  const country = $("ve_country").value;
+  const ipType = $("ve_ip_type").value;
+  return vpnExitNodes.filter(node => {
+    if (country && translateCountry(node.country) !== country) return false;
+    if (ipType === "residential" && !["residential", "mobile"].includes(node.ip_type)) return false;
+    if (ipType === "hosting" && node.ip_type !== "hosting") return false;
+    return true;
+  });
+}
+
 function populateVpnExitNodeSelect(nodeId) {
   const select = $("ve_node");
   select.innerHTML = '<option value="">选择 VPNGate 节点</option>';
-  for (const node of vpnExitNodes) {
+  const candidates = filteredVpnExitNodes().sort((left, right) => {
+    const leftAvailable = left.probe_status === "available" ? 0 : 1;
+    const rightAvailable = right.probe_status === "available" ? 0 : 1;
+    return leftAvailable - rightAvailable || (Number(right.speed) || 0) - (Number(left.speed) || 0) || (Number(left.ping) || 999999) - (Number(right.ping) || 999999);
+  });
+  for (const node of candidates) {
     const option = document.createElement("option");
     option.value = node.id;
-    option.textContent = [node.name, node.country, node.ip].filter(Boolean).join(" · ");
+    const details = [node.name, node.ip, node.ip_type || "IP类型未知", node.probe_status === "available" ? "可用" : "待检测"].filter(Boolean);
+    option.textContent = details.join(" · ");
     select.appendChild(option);
   }
-  select.value = nodeId || "";
+  select.value = candidates.some(node => node.id === nodeId) ? nodeId : "";
+}
+
+function filterVpnExitNodes() {
+  const selectedNodeId = $("ve_node").value;
+  populateVpnExitNodeSelect(selectedNodeId);
 }
 
 function populateSingboxExitSelect(exitId) {
@@ -5164,6 +5213,7 @@ function fillVpnExitForm(exitConfig) {
   $("ve_name").value = exitConfig.name || exitConfig.id;
   $("ve_port").value = exitConfig.proxy_port || 7928;
   $("ve_enabled").checked = exitConfig.enabled !== false;
+  populateVpnExitFilters(exitConfig);
   const isDefault = exitConfig.id === "default";
   $("ve_name").disabled = isDefault;
   $("ve_port").disabled = isDefault;
@@ -5178,6 +5228,8 @@ function collectVpnExit() {
     ...previous,
     name: $("ve_name").value.trim(),
     proxy_port: parseInt($("ve_port").value, 10),
+    country: $("ve_country").value,
+    ip_type: $("ve_ip_type").value,
     node_id: $("ve_node").value,
     enabled: $("ve_enabled").checked
   };
@@ -5190,7 +5242,8 @@ function renderVpnExitTable() {
     const row = document.createElement("div");
     row.style.cssText = "display:grid;grid-template-columns:minmax(100px,1fr) minmax(120px,1.2fr) 84px auto;gap:8px;align-items:center;padding:9px 10px;border-bottom:1px solid var(--border-color);font-size:12px;";
     const name = document.createElement("span");
-    name.textContent = `${exitConfig.name || exitConfig.id} ${exitConfig.running ? "(运行中)" : "(已停止)"}`;
+    const criteria = [exitConfig.country || "所有国家", exitConfig.ip_type && exitConfig.ip_type !== "all" ? exitConfig.ip_type : "所有 IP"].join(" / ");
+    name.textContent = `${exitConfig.name || exitConfig.id} · ${criteria} ${exitConfig.running ? "(运行中)" : "(已停止)"}`;
     name.style.color = exitConfig.running ? "var(--success)" : "var(--text-primary)";
     const node = document.createElement("span");
     const source = vpnExitNodes.find(item => item.id === exitConfig.node_id);
@@ -5227,7 +5280,7 @@ function addVpnExit() {
   let port = 7929;
   while (usedPorts.has(port)) port += 1;
   const id = `exit${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`.slice(0, 32);
-  const exitConfig = { id, name: "新 VPN 出口", node_id: "", proxy_port: port, enabled: true, running: false };
+  const exitConfig = { id, name: "新 VPN 出口", country: "", ip_type: "all", node_id: "", proxy_port: port, enabled: true, running: false };
   vpnExits.push(exitConfig);
   fillVpnExitForm(exitConfig);
   renderVpnExitTable();
@@ -6215,9 +6268,13 @@ class Handler(BaseHTTPRequestHandler):
             for node in read_nodes():
                 selectable_nodes.append({
                     "id": node.get("id", ""),
-                    "name": node.get("name") or node.get("country_long") or node.get("country_short") or node.get("id", ""),
-                    "country": node.get("country_long") or node.get("country_short") or "",
+                    "name": node.get("name") or node.get("country") or node.get("country_long") or node.get("country_short") or node.get("id", ""),
+                    "country": node.get("country") or node.get("country_long") or node.get("country_short") or "",
                     "ip": node.get("ip") or node.get("remote_host") or "",
+                    "ip_type": node.get("ip_type") or "",
+                    "probe_status": node.get("probe_status") or "",
+                    "speed": parse_int(node.get("speed")),
+                    "ping": parse_int(node.get("ping")),
                 })
             self.send_json({
                 "ok": True,
