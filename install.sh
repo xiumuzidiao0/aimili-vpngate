@@ -142,6 +142,42 @@ else
     echo -e "${GREEN}  -> 已检测到 sing-box 核心，保留现有安装。${PLAIN}"
 fi
 
+# The upstream installer starts sing-box with both config.json and conf/.
+# AimiliVPN owns config.json, so loading conf/ as well creates duplicate
+# inbounds and lets stale upstream configs terminate the service.
+if command -v systemctl >/dev/null 2>&1; then
+    echo -e "  -> 正在将 sing-box 服务固定为 AimiliVPN 主配置..."
+    mkdir -p /etc/systemd/system/sing-box.service.d
+    cat > /etc/systemd/system/sing-box.service.d/aimilivpn.conf <<'EOF'
+[Service]
+ExecStart=
+ExecStart=/etc/sing-box/bin/sing-box run -c /etc/sing-box/config.json
+EOF
+    systemctl daemon-reload
+    systemctl enable sing-box.service >/dev/null 2>&1 || true
+elif command -v rc-service >/dev/null 2>&1; then
+    echo -e "  -> 正在将 sing-box 服务固定为 AimiliVPN 主配置..."
+    cat > /etc/init.d/sing-box <<'EOF'
+#!/sbin/openrc-run
+
+description="sing-box managed by AimiliVPN"
+command="/etc/sing-box/bin/sing-box"
+command_args="run -c /etc/sing-box/config.json"
+command_background="yes"
+pidfile="/run/sing-box.pid"
+output_log="/var/log/sing-box/access.log"
+error_log="/var/log/sing-box/error.log"
+supervisor="supervise-daemon"
+
+depend() {
+    need net
+    after firewall
+}
+EOF
+    chmod +x /etc/init.d/sing-box
+    rc-update add sing-box default >/dev/null 2>&1 || true
+fi
+
 # 6. Configure Service
 echo -e "\n${YELLOW}[4/5] 正在配置系统服务...${PLAIN}"
 if command -v systemctl >/dev/null 2>&1; then

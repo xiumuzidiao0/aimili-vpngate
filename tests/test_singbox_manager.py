@@ -103,10 +103,21 @@ class SingBoxManagerTests(unittest.TestCase):
     def test_openrc_reload_maps_to_restart(self):
         with patch.object(singbox_manager, "_service_manager", return_value="openrc"), \
              patch.object(singbox_manager, "_run") as run, \
+             patch.object(singbox_manager.time, "sleep"), \
              patch.object(singbox_manager, "status", return_value={"running": True}):
             run.return_value.returncode = 0
             singbox_manager.service_action("reload")
             run.assert_called_once_with(["rc-service", "sing-box", "restart"], timeout=30)
+
+    def test_service_action_reports_immediate_exit(self):
+        with patch.object(singbox_manager, "_service_manager", return_value="openrc"), \
+             patch.object(singbox_manager, "_run") as run, \
+             patch.object(singbox_manager.time, "sleep"), \
+             patch.object(singbox_manager, "status", return_value={"running": False, "service_detail": "crashed"}), \
+             patch.object(singbox_manager, "recent_logs", return_value=["bind: address already in use"]):
+            run.return_value.returncode = 0
+            with self.assertRaisesRegex(singbox_manager.SingBoxError, "address already in use"):
+                singbox_manager.service_action("restart")
 
 
 if __name__ == "__main__":

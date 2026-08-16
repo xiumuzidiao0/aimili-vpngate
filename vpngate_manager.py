@@ -506,7 +506,8 @@ def current_singbox_nodes(ui_cfg: dict[str, Any] | None = None) -> list[dict[str
 
 def singbox_api_status(ui_cfg: dict[str, Any] | None = None) -> dict[str, Any]:
     ui_cfg = ui_cfg or load_ui_config()
-    settings = current_singbox_settings(ui_cfg)
+    nodes = current_singbox_nodes(ui_cfg)
+    has_enabled_node = any(node.get("enabled") and node.get("chain_enabled") for node in nodes)
     try:
         runtime = singbox_manager.status()
     except Exception as exc:
@@ -520,17 +521,16 @@ def singbox_api_status(ui_cfg: dict[str, Any] | None = None) -> dict[str, Any]:
             "settings": {},
         }
     chain_ready = bool(
-        settings.get("enabled")
-        and settings.get("chain_enabled")
+        has_enabled_node
         and runtime.get("running")
         and active_openvpn_running()
     )
     runtime["chain_ready"] = chain_ready
     runtime["chain_error"] = "" if chain_ready else (
-        "代理链未启用" if not settings.get("enabled") or not settings.get("chain_enabled")
+        "代理链未启用" if not has_enabled_node
         else "等待 sing-box 服务或 VPNGate OpenVPN 出口就绪"
     )
-    runtime["settings"] = singbox_manager.redact_settings(settings)
+    runtime["nodes"] = [singbox_manager.redact_settings(node) for node in nodes]
     return runtime
 
 def safe_name(value: str) -> str:
@@ -3598,6 +3598,7 @@ INDEX_HTML = r"""<!doctype html>
           <button type="button" class="connect-btn" title="新增协议节点" onclick="addSingboxNode()">新增</button>
           <button type="button" class="test-btn" title="删除当前协议节点" onclick="deleteSingboxNode()">删除</button>
         </div>
+        <div id="sb_node_table" style="margin:-4px 0 16px;border:1px solid var(--border-color);border-radius:6px;overflow:hidden;"></div>
         <div class="form-group" style="margin-bottom:12px;"><label class="form-label" for="sb_protocol">入口协议</label><select id="sb_protocol" class="input-field" onchange="toggleSingboxProtocolFields()"><option value="vless-reality">VLESS-REALITY</option><option value="tuic">TUIC</option><option value="hysteria2">Hysteria2</option><option value="anytls">AnyTLS</option><option value="vless">VLESS (TCP)</option><option value="vmess">VMess (TCP)</option><option value="trojan">Trojan (TCP)</option><option value="shadowsocks">Shadowsocks</option><option value="socks">SOCKS5</option><option value="http">HTTP</option></select></div>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
           <div class="form-group" style="margin-bottom:12px;"><label class="form-label" for="sb_listen">公网监听地址</label><select id="sb_listen" class="input-field"><option value="0.0.0.0">IPv4 (0.0.0.0)</option><option value="::">IPv4 + IPv6 (::)</option></select></div>
@@ -4890,6 +4891,37 @@ function renderSingboxNodeSelect() {
     select.appendChild(option);
   }
   select.value = selectedSingboxNodeId;
+  renderSingboxNodeTable();
+}
+
+function renderSingboxNodeTable() {
+  const table = $("sb_node_table");
+  table.innerHTML = "";
+  for (const node of singboxNodes) {
+    const row = document.createElement("div");
+    row.style.cssText = "display:grid;grid-template-columns:minmax(0,1fr) 100px 56px auto;gap:8px;align-items:center;padding:9px 10px;border-bottom:1px solid var(--border-color);font-size:12px;";
+    const name = document.createElement("span");
+    name.textContent = node.name || node.protocol;
+    name.style.cssText = "overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-primary);";
+    const protocol = document.createElement("span");
+    protocol.textContent = node.protocol;
+    protocol.style.color = "var(--text-secondary)";
+    const port = document.createElement("span");
+    port.textContent = `:${node.port}`;
+    port.style.color = node.enabled ? "var(--success)" : "var(--text-secondary)";
+    const actions = document.createElement("span");
+    actions.style.cssText = "display:flex;gap:5px;justify-content:flex-end;";
+    for (const [label, handler] of [["编辑", () => selectSingboxNode(node.id)], ["复制", () => copySingboxNodeLink(node.id)], ["删除", () => { selectedSingboxNodeId = node.id; deleteSingboxNode(); }]]) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = label === "删除" ? "test-btn" : "connect-btn";
+      button.textContent = label;
+      button.onclick = handler;
+      actions.appendChild(button);
+    }
+    row.append(name, protocol, port, actions);
+    table.appendChild(row);
+  }
 }
 
 function selectedSingboxNode() {
@@ -4976,6 +5008,17 @@ async function copySingboxLink(uri) {
     $("sb_client_uri").select();
     document.execCommand("copy");
     setSingboxMessage("success", "节点链接已复制。");
+  }
+}
+
+async function copySingboxNodeLink(nodeId) {
+  try {
+    const res = await fetch(`./api/singbox/client_info?node_id=${encodeURIComponent(nodeId)}`);
+    const data = await res.json();
+    if (!res.ok || !data.ok || !data.data.uri) throw new Error(data.error || "节点链接不可用");
+    await copySingboxLink(data.data.uri);
+  } catch (err) {
+    setSingboxMessage("error", err.message || "节点链接不可用，请先保存该节点。");
   }
 }
 

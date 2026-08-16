@@ -111,7 +111,14 @@ def service_action(action: str) -> dict[str, Any]:
         result = _run(["rc-service", SINGBOX_SERVICE, command_action], timeout=30)
     if result.returncode != 0:
         raise SingBoxError(_command_error(result, f"sing-box {action} 失败"))
-    return status()
+    if action in {"start", "restart", "reload"}:
+        time.sleep(1)
+    current = status()
+    if action in {"start", "restart", "reload"} and not current["running"]:
+        logs = recent_logs(6)
+        detail = logs[-1] if logs else current.get("service_detail", "服务启动后立即退出")
+        raise SingBoxError(f"sing-box 启动后退出: {detail}")
+    return current
 
 
 def install() -> dict[str, Any]:
