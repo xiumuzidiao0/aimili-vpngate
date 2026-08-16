@@ -85,6 +85,21 @@ class SingBoxManagerTests(unittest.TestCase):
             self.assertEqual(config["outbounds"][0]["server_port"], 7928)
             self.assertEqual(config["inbounds"][0]["type"], "vless" if protocol == "vless-reality" else protocol)
 
+    def test_multiple_protocol_nodes_share_the_http_vpngate_chain(self):
+        nodes = []
+        for index, protocol in enumerate(("vless", "shadowsocks", "tuic")):
+            node = singbox_manager.new_node(7928, protocol)
+            node["port"] = 4500 + index
+            nodes.append(node)
+
+        normalized = singbox_manager.normalize_nodes(nodes, 7928, {8787, 7928})
+        config = singbox_manager.build_proxy_chain_nodes(normalized)
+
+        self.assertEqual(len(config["inbounds"]), 3)
+        self.assertEqual(config["outbounds"][0]["type"], "http")
+        self.assertEqual(config["outbounds"][0]["server_port"], 7928)
+        self.assertEqual(config["route"]["final"], "vpngate-chain")
+
     def test_openrc_reload_maps_to_restart(self):
         with patch.object(singbox_manager, "_service_manager", return_value="openrc"), \
              patch.object(singbox_manager, "_run") as run, \

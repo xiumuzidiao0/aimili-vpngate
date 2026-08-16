@@ -64,7 +64,7 @@ bash <(curl -Ls https://raw.githubusercontent.com/xiumuzidiao0/aimili-vpngate/ma
 
 安装脚本会一并部署 sing-box。登录 Web UI 后，打开“管理员 -> sing-box 代理链”，即可安装/检查服务、生成 VLESS-REALITY 凭据、设置公网入口端口和客户端服务器地址。客户端地址默认自动填入服务器公网 IP，也可改为自己的域名。链路固定为：
 
-当前 Web UI 可直接管理 VLESS-REALITY、VLESS、VMess、Trojan、Shadowsocks、SOCKS5 和 HTTP 入口；所有入口统一经由 AimiliVPN 本地 HTTP 代理和 VPNGate 出口。
+当前 Web UI 支持将多个协议节点同时加入、编辑、删除和启停：VLESS-REALITY、VLESS、VMess、Trojan、Shadowsocks、SOCKS5、HTTP、TUIC、Hysteria2、AnyTLS。每个节点都有独立端口和复制链接按钮，所有入口统一经由 AimiliVPN 本地 HTTP 代理和 VPNGate 出口。
 
 ```text
 VLESS-REALITY 客户端 -> sing-box -> 127.0.0.1:7928 -> OpenVPN tun0 -> VPNGate 节点
@@ -199,7 +199,7 @@ To prevent unauthorized scanning and abuse of the proxy port on the public inter
 
 The installer also deploys sing-box. In the Web UI, open `Admin -> sing-box Proxy Chain` to install/check the service, generate VLESS-REALITY credentials, choose the public inbound port, and set the client-facing hostname. The server public IP is filled in automatically and can be replaced with a domain name.
 
-The Web UI currently manages VLESS-REALITY, VLESS, VMess, Trojan, Shadowsocks, SOCKS5, and HTTP inbounds. Every inbound uses the AimiliVPN local HTTP proxy and VPNGate egress.
+The Web UI can add, edit, delete, and enable multiple protocol nodes at the same time: VLESS-REALITY, VLESS, VMess, Trojan, Shadowsocks, SOCKS5, HTTP, TUIC, Hysteria2, and AnyTLS. Each node has its own port and copy-link control, while every inbound uses the AimiliVPN local HTTP proxy and VPNGate egress.
 
 ```text
 VLESS-REALITY client -> sing-box -> 127.0.0.1:7928 -> OpenVPN tun0 -> VPNGate node

@@ -26,6 +26,8 @@ SINGBOX_INSTALLER = Path(
 )
 SINGBOX_LOG = Path(os.environ.get("SINGBOX_LOG", "/var/log/sing-box/access.log"))
 SINGBOX_SERVICE = os.environ.get("SINGBOX_SERVICE", "sing-box")
+TLS_CERTIFICATE = SINGBOX_DIR / "bin" / "tls.cer"
+TLS_KEY = SINGBOX_DIR / "bin" / "tls.key"
 SUPPORTED_PROTOCOLS = {
     "vless-reality",
     "vless",
@@ -34,6 +36,9 @@ SUPPORTED_PROTOCOLS = {
     "shadowsocks",
     "socks",
     "http",
+    "tuic",
+    "hysteria2",
+    "anytls",
 }
 PROTOCOL_LABELS = {
     "vless-reality": "VLESS-REALITY",
@@ -43,6 +48,9 @@ PROTOCOL_LABELS = {
     "shadowsocks": "Shadowsocks",
     "socks": "SOCKS5",
     "http": "HTTP",
+    "tuic": "TUIC",
+    "hysteria2": "Hysteria2",
+    "anytls": "AnyTLS",
 }
 SS_METHODS = {
     "aes-128-gcm",
@@ -54,6 +62,7 @@ SS_METHODS = {
 }
 SERVICE_ACTIONS = {"start", "stop", "restart", "reload"}
 LISTEN_HOSTS = {"0.0.0.0", "::"}
+TLS_PROTOCOLS = {"tuic", "hysteria2", "anytls"}
 SERVER_NAME_RE = re.compile(r"^(?=.{1,253}$)[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?$")
 
 
@@ -187,6 +196,26 @@ def generate_values(kind: str) -> dict[str, str]:
     raise SingBoxError("不支持的凭据生成类型")
 
 
+def ensure_tls_keypair() -> None:
+    """Create the self-signed TLS material used by QUIC/TLS inbounds once."""
+    if TLS_CERTIFICATE.is_file() and TLS_KEY.is_file():
+        return
+    if not installed():
+        raise SingBoxError("sing-box 尚未安装，无法生成 TLS 证书")
+    result = _run([str(SINGBOX_BIN), "generate", "tls-keypair", "tls", "-m", "456"], timeout=20)
+    if result.returncode != 0:
+        raise SingBoxError(_command_error(result, "生成 TLS 证书失败"))
+    private_key = re.search(r"-----BEGIN PRIVATE KEY-----[\s\S]+?-----END PRIVATE KEY-----", result.stdout)
+    certificate = re.search(r"-----BEGIN CERTIFICATE-----[\s\S]+?-----END CERTIFICATE-----", result.stdout)
+    if not private_key or not certificate:
+        raise SingBoxError("无法解析 sing-box 生成的 TLS 证书")
+    TLS_KEY.parent.mkdir(parents=True, exist_ok=True)
+    TLS_KEY.write_text(private_key.group(0) + "\n", encoding="utf-8")
+    TLS_CERTIFICATE.write_text(certificate.group(0) + "\n", encoding="utf-8")
+    os.chmod(TLS_KEY, 0o600)
+    os.chmod(TLS_CERTIFICATE, 0o644)
+
+
 def default_settings(proxy_port: int) -> dict[str, Any]:
     return {
         "enabled": True,
@@ -259,7 +288,7 @@ def normalize_settings(raw: dict[str, Any], proxy_port: int, forbidden_ports: se
     base["listen"] = listen
     base["port"] = _as_port(base["port"], "sing-box 入口端口", forbidden_ports)
 
-    if protocol in {"vless-reality", "vless", "vmess"}:
+    if protocol in {"vless-reality", "vless", "vmess", "tuic"}:
         try:
             base["uuid"] = str(uuid.UUID(str(base["uuid"])))
         except (ValueError, TypeError, AttributeError) as exc:
@@ -284,7 +313,7 @@ def normalize_settings(raw: dict[str, Any], proxy_port: int, forbidden_ports: se
     base["password"] = str(base.get("password") or "")
     base["username"] = str(base.get("username") or "aimilivpn")
     base["method"] = str(base.get("method") or "chacha20-ietf-poly1305").lower()
-    if protocol in {"trojan", "shadowsocks", "socks", "http"} and base["enabled"] and not base["password"]:
+    if protocol in {"trojan", "shadowsocks", "socks", "http", "tuic", "hysteria2", "anytls"} and base["enabled"] and not base["password"]:
         raise SingBoxError(f"{PROTOCOL_LABELS[protocol]} 密码不能为空")
     if protocol == "shadowsocks" and base["method"] not in SS_METHODS:
         raise SingBoxError("Shadowsocks 加密方式不受支持")
@@ -333,6 +362,30 @@ def build_proxy_chain_config(settings: dict[str, Any]) -> dict[str, Any]:
         inbound["password"] = settings["password"]
     elif protocol in {"socks", "http"}:
         inbound["users"] = [{"username": settings["username"], "password": settings["password"]}]
+    elif protocol == "tuic":
+        inbound["users"] = [{"uuid": settings["uuid"], "password": settings["password"]}]
+        inbound["congestion_control"] = "bbr"
+        inbound["tls"] = {
+            "enabled": True,
+            "alpn": ["h3"],
+            "key_path": str(TLS_KEY),
+            "certificate_path": str(TLS_CERTIFICATE),
+        }
+    elif protocol == "hysteria2":
+        inbound["users"] = [{"password": settings["password"]}]
+        inbound["tls"] = {
+            "enabled": True,
+            "alpn": ["h3"],
+            "key_path": str(TLS_KEY),
+            "certificate_path": str(TLS_CERTIFICATE),
+        }
+    elif protocol == "anytls":
+        inbound["users"] = [{"password": settings["password"]}]
+        inbound["tls"] = {
+            "enabled": True,
+            "key_path": str(TLS_KEY),
+            "certificate_path": str(TLS_CERTIFICATE),
+        }
     return {
         "log": {"level": "warn", "timestamp": True},
         "inbounds": [inbound],
@@ -362,6 +415,8 @@ def validate_config(config: dict[str, Any]) -> None:
 
 def save_config(settings: dict[str, Any], proxy_port: int, forbidden_ports: set[int]) -> dict[str, Any]:
     normalized = normalize_settings(settings, proxy_port, forbidden_ports)
+    if normalized["protocol"] in TLS_PROTOCOLS:
+        ensure_tls_keypair()
     config = build_proxy_chain_config(normalized)
     validate_config(config)
 
@@ -385,6 +440,82 @@ def save_config(settings: dict[str, Any], proxy_port: int, forbidden_ports: set[
     normalized["last_apply_at"] = int(time.time())
     normalized["last_error"] = ""
     return normalized
+
+
+def new_node(proxy_port: int, protocol: str = "vless-reality") -> dict[str, Any]:
+    settings = default_settings(proxy_port)
+    settings["id"] = secrets.token_hex(6)
+    settings["name"] = PROTOCOL_LABELS.get(protocol, protocol)
+    settings["protocol"] = protocol
+    return settings
+
+
+def normalize_nodes(raw_nodes: Any, proxy_port: int, forbidden_ports: set[int]) -> list[dict[str, Any]]:
+    if not isinstance(raw_nodes, list) or not raw_nodes:
+        raise SingBoxError("至少需要保留一个 sing-box 协议节点")
+    if len(raw_nodes) > 32:
+        raise SingBoxError("协议节点数量不能超过 32 个")
+
+    nodes: list[dict[str, Any]] = []
+    used_ports = set(forbidden_ports)
+    node_ids: set[str] = set()
+    for raw in raw_nodes:
+        if not isinstance(raw, dict):
+            raise SingBoxError("协议节点格式无效")
+        node_id = str(raw.get("id") or secrets.token_hex(6)).strip()
+        if not re.fullmatch(r"[a-zA-Z0-9_-]{4,40}", node_id) or node_id in node_ids:
+            raise SingBoxError("协议节点 ID 无效或重复")
+        normalized = normalize_settings(raw, proxy_port, used_ports)
+        normalized["id"] = node_id
+        normalized["name"] = str(raw.get("name") or PROTOCOL_LABELS[normalized["protocol"]]).strip()[:80]
+        if not normalized["name"]:
+            normalized["name"] = PROTOCOL_LABELS[normalized["protocol"]]
+        nodes.append(normalized)
+        node_ids.add(node_id)
+        used_ports.add(normalized["port"])
+    return nodes
+
+
+def build_proxy_chain_nodes(nodes: list[dict[str, Any]]) -> dict[str, Any]:
+    active_nodes = [node for node in nodes if node["enabled"] and node["chain_enabled"]]
+    if not active_nodes:
+        raise SingBoxError("至少需要启用一个协议节点")
+    config = build_proxy_chain_config(active_nodes[0])
+    config["inbounds"] = [build_proxy_chain_config(node)["inbounds"][0] for node in active_nodes]
+    for inbound, node in zip(config["inbounds"], active_nodes):
+        inbound["tag"] = f"aimilivpn-{node['id']}"
+    return config
+
+
+def save_nodes(raw_nodes: Any, proxy_port: int, forbidden_ports: set[int]) -> list[dict[str, Any]]:
+    nodes = normalize_nodes(raw_nodes, proxy_port, forbidden_ports)
+    if any(node["protocol"] in TLS_PROTOCOLS for node in nodes):
+        ensure_tls_keypair()
+    config = build_proxy_chain_nodes(nodes)
+    validate_config(config)
+
+    SINGBOX_CONFIG.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp_name = tempfile.mkstemp(prefix=".aimilivpn-config-", suffix=".json", dir=SINGBOX_CONFIG.parent)
+    temp_path = Path(temp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(config, handle, ensure_ascii=False, indent=2)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temp_path, 0o600)
+        if SINGBOX_CONFIG.exists():
+            backup = SINGBOX_CONFIG.with_name("config.aimilivpn-backup.json")
+            shutil.copy2(SINGBOX_CONFIG, backup)
+            os.chmod(backup, 0o600)
+        os.replace(temp_path, SINGBOX_CONFIG)
+    finally:
+        temp_path.unlink(missing_ok=True)
+
+    timestamp = int(time.time())
+    for node in nodes:
+        node["last_apply_at"] = timestamp
+        node["last_error"] = ""
+    return nodes
 
 
 def load_runtime_config() -> dict[str, Any]:
@@ -472,6 +603,18 @@ def client_info(settings: dict[str, Any]) -> dict[str, str]:
         uri = f"{scheme}://{userinfo}{host_part}:{settings['port']}"
     elif protocol == "trojan":
         uri = f"trojan://{urllib.parse.quote(settings['password'])}@{host_part}:{settings['port']}?security=none&type=tcp#{urllib.parse.quote(label)}"
+    elif protocol == "tuic":
+        uri = (
+            f"tuic://{settings['uuid']}:{urllib.parse.quote(settings['password'])}@{host_part}:{settings['port']}"
+            f"?alpn=h3&insecure=1&congestion_control=bbr#{urllib.parse.quote(label)}"
+        )
+    elif protocol == "hysteria2":
+        uri = (
+            f"hysteria2://{urllib.parse.quote(settings['password'])}@{host_part}:{settings['port']}"
+            f"?alpn=h3&insecure=1#{urllib.parse.quote(label)}"
+        )
+    elif protocol == "anytls":
+        uri = f"anytls://{urllib.parse.quote(settings['password'])}@{host_part}:{settings['port']}?insecure=1#{urllib.parse.quote(label)}"
     else:
         raise SingBoxError("当前入口协议暂不支持客户端 URI")
     return {"protocol": protocol, "uri": uri}
