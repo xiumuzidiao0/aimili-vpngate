@@ -7,6 +7,18 @@ YELLOW='\033[0;33m'
 BLUE='\033[0;36m'
 PLAIN='\033[0m'
 
+# Keep installer output safe for pipes, log collectors, and web terminals.
+# Some service managers emit cursor-control sequences when their output is
+# attached to a pseudo terminal; those sequences become literal `^[[B` text
+# in terminals that do not interpret ANSI controls.
+if [ ! -t 1 ]; then
+    RED=''
+    GREEN=''
+    YELLOW=''
+    BLUE=''
+    PLAIN=''
+fi
+
 # 1. Check root permissions
 if [ "$(id -u)" != "0" ]; then
     echo -e "${RED}错误: 必须以 root 权限运行此脚本。请使用: sudo bash $0${PLAIN}"
@@ -427,7 +439,10 @@ def format_line(label, value, target_width=26):
     return f"{prefix}{label}{padding}:  {value}"
 
 def print_line(text=""):
-    print(f"{text}\033[K")
+    # Erase-to-end-of-line is useful in the interactive dashboard, but leaks
+    # raw ANSI text in redirected/non-TTY output.
+    suffix = "\033[K" if sys.stdout.isatty() else ""
+    print(f"{text}{suffix}")
 
 def print_status():
     cfg = load_ui_cfg()
@@ -1195,11 +1210,11 @@ fi
 
 echo -e "\n正在启动 AimiliVPN 服务并初始化网络..."
 if command -v systemctl >/dev/null 2>&1; then
-    systemctl restart aimilivpn.service || true
-    systemctl restart sing-box.service || true
+    systemctl restart aimilivpn.service >/dev/null 2>&1 || true
+    systemctl restart sing-box.service >/dev/null 2>&1 || true
 elif command -v rc-service >/dev/null 2>&1; then
-    rc-service aimilivpn restart || true
-    rc-service sing-box restart || true
+    rc-service aimilivpn restart >/dev/null 2>&1 || true
+    rc-service sing-box restart >/dev/null 2>&1 || true
 fi
 
 # Wait and poll for node loading and active connection
@@ -1210,7 +1225,10 @@ for i in {1..90}; do
     if [ -f "${INSTALL_DIR}/vpngate_data/state.json" ]; then
         ACTIVE_ID=$(python3 -c "import json; print(json.load(open('${INSTALL_DIR}/vpngate_data/state.json')).get('active_openvpn_node_id', ''))" 2>/dev/null || echo "")
         IS_CONN=$(python3 -c "import json; print(json.load(open('${INSTALL_DIR}/vpngate_data/state.json')).get('is_connecting', False))" 2>/dev/null || echo "False")
-        CUR_MSG=$(python3 -c "import json; print(json.load(open('${INSTALL_DIR}/vpngate_data/state.json')).get('last_check_message', ''))" 2>/dev/null || echo "")
+        # Strip any accidental ANSI controls from persisted status text before
+        # printing it. This keeps older state files and third-party log output
+        # from reintroducing raw cursor sequences into the installer log.
+        CUR_MSG=$(python3 -c "import json,re; value=json.load(open('${INSTALL_DIR}/vpngate_data/state.json')).get('last_check_message', ''); print(re.sub(r'\\x1b\\[[0-?]*[ -/]*[@-~]', '', str(value)))" 2>/dev/null || echo "")
         
         if [ "$IS_CONN" = "False" ] || [ "$IS_CONN" = "false" ]; then
             if [ -n "$ACTIVE_ID" ]; then
