@@ -4984,6 +4984,7 @@ function addSingboxNode() {
   selectedSingboxNodeId = id;
   renderSingboxNodeSelect();
   fillSingboxForm(node);
+  $("sb_client_uri").value = "";
   setSingboxMessage("success", "已新增协议节点；生成凭据后点击保存并应用。");
 }
 
@@ -5171,7 +5172,13 @@ async function saveSingboxConfig(event) {
 
 async function loadSingboxClientInfo() {
   try {
-    const res = await fetch(`./api/singbox/client_info?node_id=${encodeURIComponent(selectedSingboxNodeId)}`);
+    const node = collectSingboxNode();
+    if (!node) throw new Error("未选择协议节点");
+    const res = await fetch("./api/singbox/preview", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ node })
+    });
     const data = await res.json();
     if (!res.ok || !data.ok) throw new Error(data.error || "客户端连接地址不可用");
     $("sb_client_uri").value = data.data.uri || "";
@@ -5967,6 +5974,35 @@ class Handler(BaseHTTPRequestHandler):
 
         if not self.is_authorized():
             self.send_json({"error": "Unauthorized"}, HTTPStatus.UNAUTHORIZED)
+            return
+
+        if effective_path == "/api/singbox/preview":
+            try:
+                payload = self.read_json_body()
+                incoming = payload.get("node")
+                if not isinstance(incoming, dict):
+                    raise ValueError("协议节点必须是对象")
+                node_id = str(incoming.get("id") or "")
+                existing = next((item for item in current_singbox_nodes() if item.get("id") == node_id), None)
+                base = existing or singbox_manager.new_node(LOCAL_PROXY_PORT)
+                allowed_fields = {
+                    "id", "name", "enabled", "chain_enabled", "protocol", "listen", "port", "uuid", "server_name",
+                    "short_id", "private_key", "public_key", "public_host", "password", "method", "username"
+                }
+                settings = {**base, **{key: value for key, value in incoming.items() if key in allowed_fields}}
+                ui_cfg = load_ui_config()
+                proxy_port = bounded_int(ui_cfg.get("proxy_port"), LOCAL_PROXY_PORT, 1024, 65535)
+                normalized = singbox_manager.normalize_settings(
+                    settings,
+                    proxy_port,
+                    {bounded_int(ui_cfg.get("port"), UI_PORT, 1, 65535), proxy_port},
+                )
+                self.send_json({"ok": True, "data": singbox_manager.client_info(normalized)})
+            except (ValueError, singbox_manager.SingBoxError) as exc:
+                self.send_json({"ok": False, "error": str(exc)}, HTTPStatus.BAD_REQUEST)
+            except Exception as exc:
+                log_to_json("ERROR", "SingBox", f"生成节点预览链接失败: {exc}")
+                self.send_json({"ok": False, "error": "生成节点预览链接失败"}, HTTPStatus.INTERNAL_SERVER_ERROR)
             return
 
         if effective_path == "/api/singbox/config":
