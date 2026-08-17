@@ -5,6 +5,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import config_store
+import auth_security
 import singbox_manager
 import vpngate_manager
 
@@ -84,6 +85,8 @@ class ConfigStoreTests(unittest.TestCase):
 
             self.assertEqual(loaded["schema_version"], 2)
             self.assertEqual(loaded["desired_state"]["vpn_exits"]["default"], "running")
+            self.assertNotIn("password", loaded)
+            self.assertTrue(auth_security.verify_password("password", loaded["password_hash"]))
             backups = list(data_dir.glob("ui_auth.json.v1.*.bak"))
             self.assertEqual(len(backups), 1)
             self.assertNotIn("schema_version", json.loads(backups[0].read_text(encoding="utf-8")))

@@ -248,9 +248,14 @@ import time
 import tty
 import termios
 import shutil
+from pathlib import Path
 
 INSTALL_DIR = "/opt/aimilivpn"
 LOG_FILE = "/opt/aimilivpn/vpngate_data/vpngate.log"
+sys.path.insert(0, INSTALL_DIR)
+
+import auth_security
+import config_store
 
 def generate_random_password():
     import random
@@ -269,7 +274,7 @@ def generate_random_suffix():
 def load_ui_cfg():
     import json
     path = "/opt/aimilivpn/vpngate_data/ui_auth.json"
-    cfg = {"host": "::", "port": 8787, "secret_path": "EJsW2EeBo9lY", "password": ""}
+    cfg = {"host": "::", "port": 8787, "secret_path": "EJsW2EeBo9lY", "password_hash": ""}
     if os.path.exists(path):
         try:
             with open(path, "r", encoding="utf-8") as f:
@@ -281,12 +286,12 @@ def load_ui_cfg():
     return cfg
 
 def save_ui_cfg(cfg):
-    import json
     path = "/opt/aimilivpn/vpngate_data/ui_auth.json"
     os.makedirs(os.path.dirname(path), exist_ok=True)
     try:
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(cfg, f, ensure_ascii=False, indent=2)
+        auth_security.migrate_password(cfg)
+        cfg, _ = config_store.migrate_ui_config(cfg)
+        config_store.save_versioned_config(Path(path), cfg, create_backup=True)
         return True
     except Exception:
         return False
@@ -494,9 +499,7 @@ def print_status():
         login_ip = f"[{host_cfg}]" if ":" in host_cfg else host_cfg
     print_line(format_line("网页登录地址", f"{yellow}http://{login_ip}:{ui_port}/{secret_path}/{reset}"))
     print_line(format_line("网页管理账号", cfg.get("username", "未配置")))
-    curr_pwd = cfg.get("password", "")
-    masked_pwd = curr_pwd if len(curr_pwd) <= 4 else curr_pwd[:3] + "********" + curr_pwd[-2:]
-    print_line(format_line("网页管理密码", masked_pwd))
+    print_line(format_line("网页管理密码", "已设置（哈希存储，不会显示）" if auth_security.has_password(cfg) else "未设置"))
     print_line()
     print_line("【活动节点状态】")
     if is_connecting:
@@ -788,10 +791,9 @@ def configure_credentials():
         print("                    管理账号密码管理                   ")
         print("=======================================================")
         curr_uname = cfg.get('username', '未配置')
-        curr_pwd = cfg.get('password', '')
-        masked_pwd = curr_pwd if len(curr_pwd) <= 4 else curr_pwd[:3] + "********" + curr_pwd[-2:]
+        password_set = auth_security.has_password(cfg)
         print(f"当前管理账号: {curr_uname}")
-        print(f"当前管理密码: {masked_pwd}")
+        print(f"当前管理密码: {'已设置（哈希存储，不可查看）' if password_set else '未设置'}")
         print("  [1] 自定义修改账号密码")
         print("  [2] 随机重置安全密码")
         print("  [3] 返回主菜单")
@@ -810,7 +812,7 @@ def configure_credentials():
                 time.sleep(2)
                 continue
             cfg['username'] = new_uname
-            cfg['password'] = new_pwd
+            auth_security.set_password(cfg, new_pwd)
             save_ui_cfg(cfg)
             print("账号密码修改成功！")
             print(f"您的新管理账号: {new_uname}")
@@ -819,7 +821,7 @@ def configure_credentials():
         elif key == '2':
             print("\033[H\033[J", end="")
             new_pwd = generate_random_password()
-            cfg['password'] = new_pwd
+            auth_security.set_password(cfg, new_pwd)
             save_ui_cfg(cfg)
             print("密码随机重置成功！")
             print(f"您的全新12位安全密码为: {new_pwd}")
@@ -879,7 +881,7 @@ def get_status_state():
         cfg.get("port", 8787),
         cfg.get("secret_path", "EJsW2EeBo9lY"),
         cfg.get("username", "未配置"),
-        cfg.get("password", ""),
+        auth_security.has_password(cfg),
         cfg.get("host", "0.0.0.0"),
         state.get("is_connecting", False),
         state.get("active_openvpn_node_id", ""),
@@ -1030,6 +1032,7 @@ AUTH_FILE="${INSTALL_DIR}/vpngate_data/ui_auth.json"
 mkdir -p "${INSTALL_DIR}/vpngate_data"
 
 is_custom="n"
+INSTALL_GENERATED_PASSWORD=""
 if [ ! -f "$AUTH_FILE" ]; then
     if [ -t 0 ]; then
         echo -e "\n${YELLOW}检测到是首次安装，是否需要自定义配置网页端参数（端口/安全后缀/登录账号密码）？${PLAIN}"
@@ -1112,24 +1115,30 @@ while True:
             fi
         done
     fi
+    INSTALL_GENERATED_PASSWORD="$UI_PASSWORD"
 
     # Write config JSON. Values are passed as argv to avoid breaking Python code
     # when username/password contain quotes, backslashes, or shell metacharacters.
-    python3 - "$AUTH_FILE" "$UI_PORT" "$SECRET_PATH" "$UI_USERNAME" "$UI_PASSWORD" <<'PY'
-import json
+    python3 - "$INSTALL_DIR" "$AUTH_FILE" "$UI_PORT" "$SECRET_PATH" "$UI_USERNAME" "$UI_PASSWORD" <<'PY'
 import sys
+from pathlib import Path
 
-auth_file, ui_port, secret_path, username, password = sys.argv[1:6]
+install_dir, auth_file, ui_port, secret_path, username, password = sys.argv[1:7]
+sys.path.insert(0, install_dir)
+
+import auth_security
+import config_store
+
 cfg = {
+    "schema_version": config_store.CURRENT_SCHEMA_VERSION,
     "host": "::",
     "port": int(ui_port),
     "proxy_port": 7928,
     "secret_path": secret_path,
     "username": username,
-    "password": password,
+    "password_hash": auth_security.hash_password(password),
 }
-with open(auth_file, "w", encoding="utf-8") as f:
-    json.dump(cfg, f, ensure_ascii=False, indent=2)
+config_store.atomic_write_json(Path(auth_file), cfg)
 PY
 fi
 
@@ -1257,14 +1266,16 @@ fi
 
 SECRET_PATH="EJsW2EeBo9lY"
 USERNAME="未配置"
-PASSWORD="未配置"
+PASSWORD="${INSTALL_GENERATED_PASSWORD:-已设置（哈希存储，不会显示）}"
 UI_PORT=8787
 PROXY_PORT=7928
 AUTH_FILE="${INSTALL_DIR}/vpngate_data/ui_auth.json"
 if [ -f "$AUTH_FILE" ]; then
     SECRET_PATH=$(python3 -c "import json; print(json.load(open('$AUTH_FILE')).get('secret_path', 'EJsW2EeBo9lY'))" 2>/dev/null || echo "EJsW2EeBo9lY")
     USERNAME=$(python3 -c "import json; print(json.load(open('$AUTH_FILE')).get('username', '未配置'))" 2>/dev/null || echo "未配置")
-    PASSWORD=$(python3 -c "import json; print(json.load(open('$AUTH_FILE')).get('password', '未配置'))" 2>/dev/null || echo "未配置")
+    if [ -z "$INSTALL_GENERATED_PASSWORD" ]; then
+        PASSWORD=$(python3 -c "import json; d=json.load(open('$AUTH_FILE')); print(d.get('password') or ('已设置（哈希存储，不会显示）' if d.get('password_hash') else '未配置'))" 2>/dev/null || echo "未配置")
+    fi
     UI_PORT=$(python3 -c "import json; print(json.load(open('$AUTH_FILE')).get('port', 8787))" 2>/dev/null || echo "8787")
     PROXY_PORT=$(python3 -c "import json; print(json.load(open('$AUTH_FILE')).get('proxy_port', 7928))" 2>/dev/null || echo "7928")
 fi

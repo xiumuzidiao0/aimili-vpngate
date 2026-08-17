@@ -4,7 +4,7 @@ import tempfile
 import unittest
 import urllib.parse
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import singbox_manager
 import vpngate_manager
@@ -256,6 +256,65 @@ class VpnExitTests(unittest.TestCase):
         by_id = {item["id"]: item for item in normalized}
         self.assertEqual((by_id["usa"]["tun_name"], by_id["usa"]["route_table"]), ("tun1", 101))
         self.assertEqual((by_id["japan"]["tun_name"], by_id["japan"]["route_table"]), ("tun2", 102))
+
+    def test_vpn_exit_start_failure_cleans_process_route_and_proxy(self):
+        exit_config = {
+            "id": "usa",
+            "enabled": True,
+            "node_id": "us-node",
+            "tun_name": "tun1",
+            "route_table": 101,
+            "proxy_port": 7929,
+        }
+        process = MagicMock(pid=1234)
+        process.poll.return_value = None
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(vpngate_manager, "CONFIG_DIR", Path(directory)), \
+             patch.object(vpngate_manager, "current_vpn_exits", return_value=[exit_config]), \
+             patch.object(vpngate_manager, "read_nodes", return_value=[{"id": "us-node", "config_text": "client"}]), \
+             patch.object(vpngate_manager, "run_openvpn_until_ready", return_value=(True, "ready", process)), \
+             patch.object(vpngate_manager, "setup_policy_routing", side_effect=RuntimeError("route failed")), \
+             patch.object(vpngate_manager, "stop_process") as stop_process, \
+             patch.object(vpngate_manager, "cleanup_policy_routing") as cleanup_route, \
+             patch.object(vpngate_manager, "stop_vpn_exit_proxy") as stop_proxy:
+            vpngate_manager.vpn_exit_processes.clear()
+            vpngate_manager.vpn_exit_runtime_states.clear()
+            with self.assertRaisesRegex(RuntimeError, "route failed"):
+                vpngate_manager.start_vpn_exit("usa")
+
+        stop_process.assert_called_once_with(process)
+        cleanup_route.assert_called_once_with(101)
+        stop_proxy.assert_called_once_with("usa", 7929)
+        self.assertNotIn("usa", vpngate_manager.vpn_exit_processes)
+        self.assertEqual(vpngate_manager.vpn_exit_runtime_states["usa"]["phase"], "failed")
+
+    def test_vpn_exit_start_reports_proxy_ready_phase(self):
+        exit_config = {
+            "id": "usa",
+            "enabled": True,
+            "node_id": "us-node",
+            "tun_name": "tun1",
+            "route_table": 101,
+            "proxy_port": 7929,
+        }
+        process = MagicMock(pid=1234)
+        process.poll.return_value = None
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(vpngate_manager, "CONFIG_DIR", Path(directory)), \
+             patch.object(vpngate_manager, "current_vpn_exits", return_value=[exit_config]), \
+             patch.object(vpngate_manager, "read_nodes", return_value=[{"id": "us-node", "config_text": "client"}]), \
+             patch.object(vpngate_manager, "run_openvpn_until_ready", return_value=(True, "ready", process)), \
+             patch.object(vpngate_manager, "setup_policy_routing"), \
+             patch.object(vpngate_manager, "start_vpn_exit_proxy"), \
+             patch.object(vpngate_manager, "wait_for_tcp_listener", return_value=True):
+            vpngate_manager.vpn_exit_processes.clear()
+            vpngate_manager.vpn_exit_runtime_states.clear()
+            status = vpngate_manager.start_vpn_exit("usa")
+
+        self.assertTrue(status["running"])
+        self.assertEqual(status["phase"], "proxy_ready")
+        self.assertEqual(status["runtime"]["proxy_endpoint"], "127.0.0.1:7929")
+        vpngate_manager.vpn_exit_processes.clear()
 
     def test_bind_rejects_unknown_exit(self):
         with self.assertRaises(singbox_manager.SingBoxError):

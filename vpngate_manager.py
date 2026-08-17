@@ -9,6 +9,7 @@ import json
 import os
 import queue
 import re
+import secrets
 import select
 import shlex
 import signal
@@ -82,6 +83,7 @@ import vpn_utils
 import proxy_server
 import singbox_manager
 import config_store
+import auth_security
 
 def env_int(name: str, default: int, min_value: int | None = None, max_value: int | None = None) -> int:
     raw = os.environ.get(name)
@@ -125,6 +127,10 @@ LOCAL_PROXY_PORT = env_int("LOCAL_PROXY_PORT", 7928, 1, 65535)
 UI_HOST = os.environ.get("UI_HOST", "::")
 UI_PORT = env_int("UI_PORT", 8787, 1, 65535)
 INVALID_BACKOFF_SECONDS = env_int("INVALID_BACKOFF_SECONDS", 30 * 60, 1)
+SESSION_TTL_SECONDS = env_int("SESSION_TTL_SECONDS", 24 * 60 * 60, 300, 30 * 24 * 60 * 60)
+UI_COOKIE_SECURE = os.environ.get("UI_COOKIE_SECURE", "").strip().lower() in {"1", "true", "yes", "on"}
+LOGIN_ATTEMPT_WINDOW_SECONDS = 5 * 60
+LOGIN_ATTEMPT_LIMIT = 10
 
 ROOT_DIR = Path(sys.executable).resolve().parent if globals().get("__compiled__") else Path(__file__).resolve().parent
 DATA_DIR = Path(os.environ["VPNGATE_DATA_DIR"]).resolve() if os.environ.get("VPNGATE_DATA_DIR") else ROOT_DIR / "vpngate_data"
@@ -141,12 +147,14 @@ PUBLIC_IP_ENDPOINTS = ("https://api.ipify.org", "https://api64.ipify.org")
 lock = threading.RLock()
 maintenance_lock = threading.Lock()
 active_sessions: dict[str, float] = {}
+login_attempts: dict[str, list[float]] = {}
 active_openvpn_process: subprocess.Popen[str] | None = None
 active_openvpn_node_id = ""
 vpn_exit_processes: dict[str, subprocess.Popen[str]] = {}
 vpn_exit_lock = threading.RLock()
 vpn_exit_proxy_ports: set[int] = set()
 vpn_exit_proxy_stops: dict[str, threading.Event] = {}
+vpn_exit_runtime_states: dict[str, dict[str, Any]] = {}
 is_connecting = False
 last_active_ping_time = 0.0
 last_active_latency = 0
@@ -155,6 +163,28 @@ last_collector_heartbeat = 0.0
 last_checker_heartbeat = 0.0
 last_pinger_heartbeat = 0.0
 server_start_time = time.time()
+
+
+def login_is_rate_limited(client_ip: str, now: float | None = None) -> bool:
+    current = time.time() if now is None else now
+    cutoff = current - LOGIN_ATTEMPT_WINDOW_SECONDS
+    with lock:
+        recent = [attempt for attempt in login_attempts.get(client_ip, []) if attempt > cutoff]
+        if recent:
+            login_attempts[client_ip] = recent
+        else:
+            login_attempts.pop(client_ip, None)
+        return len(recent) >= LOGIN_ATTEMPT_LIMIT
+
+
+def record_login_result(client_ip: str, success: bool, now: float | None = None) -> None:
+    with lock:
+        if success:
+            login_attempts.pop(client_ip, None)
+            return
+        current = time.time() if now is None else now
+        attempts = login_attempts.setdefault(client_ip, [])
+        attempts.append(current)
 
 def ensure_dirs() -> None:
     DATA_DIR.mkdir(exist_ok=True, parents=True)
@@ -165,6 +195,32 @@ def ensure_dirs() -> None:
             AUTH_FILE.chmod(0o600)
         except OSError:
             pass
+
+
+def set_vpn_exit_runtime(exit_id: str, phase: str, **details: Any) -> dict[str, Any]:
+    with vpn_exit_lock:
+        previous = vpn_exit_runtime_states.get(exit_id, {})
+        state = {
+            **previous,
+            "phase": phase,
+            "last_transition_at": time.time(),
+            **details,
+        }
+        if phase not in {"failed"} and "error" not in details:
+            state["error"] = ""
+        vpn_exit_runtime_states[exit_id] = state
+        return dict(state)
+
+
+def wait_for_tcp_listener(host: str, port: int, timeout: float = 3.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            with socket.create_connection((host, port), timeout=0.25):
+                return True
+        except OSError:
+            time.sleep(0.1)
+    return False
 
 def upstream_proxy_auth_file() -> str | None:
     username, password = vpn_utils.get_upstream_proxy_auth()
@@ -225,7 +281,6 @@ def read_json(path: Path, default: Any) -> Any:
         except (OSError, json.JSONDecodeError):
             return default
 
-import hashlib
 import random
 
 def generate_random_password() -> str:
@@ -260,7 +315,7 @@ def load_ui_config() -> dict[str, Any]:
             "schema_version": config_store.CURRENT_SCHEMA_VERSION,
             "username": "",
             "secret_path": "EJsW2EeBo9lY",
-            "password": "",
+            "password_hash": "",
             "host": UI_HOST,
             "port": UI_PORT,
             "proxy_port": LOCAL_PROXY_PORT,
@@ -300,13 +355,16 @@ def load_ui_config() -> dict[str, Any]:
             for key in ["host", "port", "proxy_port", "routing_mode", "force_country", "routing_ip_type", "connection_enabled", "fixed_node_id", "favorite_node_ids", "fav_fail_fallback", "singbox"]:
                 if key not in data:
                     updated = True
+
+        if auth_security.migrate_password(config):
+            updated = True
         
         if not config.get("username"):
             config["username"] = generate_random_username()
             updated = True
             
-        if not config.get("password"):
-            config["password"] = generate_random_password()
+        if not auth_security.has_password(config):
+            auth_security.set_password(config, generate_random_password())
             updated = True
 
         normalized_port = bounded_int(config.get("port"), UI_PORT, 1, 65535)
@@ -413,10 +471,6 @@ try:
 except Exception:
     pass
 
-def get_session_token(password: str, username: str = "admin") -> str:
-    salt = "aimilivpn_secure_salt_2026"
-    return hashlib.sha256((username + ":" + password + salt).encode("utf-8")).hexdigest()
-
 _last_cleanup_time = 0.0
 
 def cleanup_old_logs(logs_dir: Path) -> None:
@@ -499,7 +553,7 @@ def get_state() -> dict[str, Any]:
     state["username"] = ui_cfg.get("username", "admin")
     state["port"] = ui_cfg.get("port", 8787)
     state["secret_path"] = ui_cfg.get("secret_path", "EJsW2EeBo9lY")
-    state["password_set"] = bool(ui_cfg.get("password"))
+    state["password_set"] = auth_security.has_password(ui_cfg)
     state["proxy_port"] = ui_cfg.get("proxy_port", 7928)
     state["routing_mode"] = ui_cfg.get("routing_mode", "auto")
     state["force_country"] = ui_cfg.get("force_country", "")
@@ -667,11 +721,36 @@ def vpn_exit_status(exit_config: dict[str, Any]) -> dict[str, Any]:
     if exit_id == "default":
         running = active_openvpn_running()
         node_id = active_openvpn_node_id
+        runtime = vpn_exit_runtime_states.get(exit_id, {})
+        phase = runtime.get("phase") or ("healthy" if running else "stopped")
+        if running and phase in {"failed", "stopped"}:
+            runtime = set_vpn_exit_runtime(exit_id, "healthy", node_id=node_id)
+            phase = "healthy"
     else:
         process = vpn_exit_processes.get(exit_id)
         running = process is not None and process.poll() is None
         node_id = exit_config.get("node_id", "")
-    return {**exit_config, "running": running, "active_node_id": node_id}
+        runtime = vpn_exit_runtime_states.get(exit_id, {})
+        phase = runtime.get("phase") or ("proxy_ready" if running else "stopped")
+        if not running and phase in {"connecting", "tunnel_ready", "proxy_ready", "healthy"}:
+            runtime = set_vpn_exit_runtime(exit_id, "failed", error="OpenVPN 进程已退出")
+            phase = "failed"
+    return {
+        **exit_config,
+        "running": running,
+        "active_node_id": node_id,
+        "phase": phase,
+        "healthy": phase == "healthy",
+        "runtime": dict(runtime),
+    }
+
+
+def vpn_exit_view_status(exit_config: dict[str, Any], ui_cfg: dict[str, Any]) -> dict[str, Any]:
+    status_result = vpn_exit_status(exit_config)
+    desired_exits = ui_cfg.get("desired_state", {}).get("vpn_exits", {})
+    desired = desired_exits.get(exit_config["id"]) if isinstance(desired_exits, dict) else None
+    status_result["desired_state"] = desired or ("running" if exit_config["id"] == "default" else "stopped")
+    return status_result
 
 
 def start_vpn_exit_proxy(exit_config: dict[str, Any]) -> None:
@@ -802,7 +881,13 @@ def start_vpn_exit(exit_id: str) -> dict[str, Any]:
     if exit_id == "default":
         if not exit_config["node_id"]:
             raise ValueError("请先为默认出口选择 VPNGate 节点")
-        connect_node(exit_config["node_id"])
+        set_vpn_exit_runtime(exit_id, "connecting", node_id=exit_config["node_id"])
+        try:
+            connect_node(exit_config["node_id"])
+            set_vpn_exit_runtime(exit_id, "healthy", node_id=exit_config["node_id"])
+        except Exception as exc:
+            set_vpn_exit_runtime(exit_id, "failed", node_id=exit_config["node_id"], error=str(exc))
+            raise
         return vpn_exit_status(exit_config)
     if not exit_config["node_id"]:
         raise ValueError("请先为出口选择 VPNGate 节点")
@@ -815,16 +900,37 @@ def start_vpn_exit(exit_id: str) -> dict[str, Any]:
             raise ValueError("所选 VPNGate 节点不存在，请先刷新节点")
         config_path = CONFIG_DIR / f"exit-{safe_name(exit_id)}.ovpn"
         CONFIG_DIR.mkdir(exist_ok=True, parents=True)
-        config_path.write_text(node.get("config_text") or "", encoding="utf-8")
-        ok, message, process = run_openvpn_until_ready(
-            str(config_path), keep_alive=True, route_nopull=True, dev=exit_config["tun_name"],
-        )
-        if not ok or process is None:
+        set_vpn_exit_runtime(exit_id, "preparing", node_id=node["id"])
+        process: subprocess.Popen[str] | None = None
+        try:
+            config_path.write_text(node.get("config_text") or "", encoding="utf-8")
+            os.chmod(config_path, 0o600)
+            set_vpn_exit_runtime(exit_id, "connecting", node_id=node["id"])
+            ok, message, process = run_openvpn_until_ready(
+                str(config_path), keep_alive=True, route_nopull=True, dev=exit_config["tun_name"],
+            )
+            if not ok or process is None:
+                raise RuntimeError(message)
+            vpn_exit_processes[exit_id] = process
+            set_vpn_exit_runtime(exit_id, "tunnel_ready", node_id=node["id"], pid=process.pid)
+            setup_policy_routing(exit_config["tun_name"], exit_config["route_table"])
+            start_vpn_exit_proxy(exit_config)
+            if not wait_for_tcp_listener("127.0.0.1", exit_config["proxy_port"]):
+                raise RuntimeError("VPN 出口本地代理启动超时")
+            set_vpn_exit_runtime(
+                exit_id,
+                "proxy_ready",
+                node_id=node["id"],
+                pid=process.pid,
+                proxy_endpoint=f"127.0.0.1:{exit_config['proxy_port']}",
+            )
+        except Exception as exc:
+            stop_process(vpn_exit_processes.pop(exit_id, process))
+            cleanup_policy_routing(exit_config["route_table"])
+            stop_vpn_exit_proxy(exit_id, exit_config["proxy_port"])
             config_path.unlink(missing_ok=True)
-            raise RuntimeError(message)
-        vpn_exit_processes[exit_id] = process
-        setup_policy_routing(exit_config["tun_name"], exit_config["route_table"])
-        start_vpn_exit_proxy(exit_config)
+            set_vpn_exit_runtime(exit_id, "failed", node_id=node["id"], error=str(exc))
+            raise
     return vpn_exit_status(exit_config)
 
 
@@ -833,13 +939,17 @@ def stop_vpn_exit(exit_id: str) -> dict[str, Any]:
     if not exit_config:
         raise ValueError("未找到 VPN 出口")
     if exit_id == "default":
+        set_vpn_exit_runtime(exit_id, "stopping")
         stop_active_openvpn()
+        set_vpn_exit_runtime(exit_id, "stopped")
     else:
         with vpn_exit_lock:
+            set_vpn_exit_runtime(exit_id, "stopping")
             stop_process(vpn_exit_processes.pop(exit_id, None))
             cleanup_policy_routing(exit_config["route_table"])
             stop_vpn_exit_proxy(exit_id, exit_config["proxy_port"])
             (CONFIG_DIR / f"exit-{safe_name(exit_id)}.ovpn").unlink(missing_ok=True)
+            set_vpn_exit_runtime(exit_id, "stopped")
     return vpn_exit_status(exit_config)
 
 def singbox_api_status(ui_cfg: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -2108,10 +2218,8 @@ def connect_node(node_id: str) -> str:
             ui_cfg["vpn_exits"] = exits
         if ui_cfg.get("routing_mode") == "fixed_ip":
             ui_cfg["fixed_node_id"] = node_id
-        auth_file = DATA_DIR / "ui_auth.json"
-        with lock:
-            DATA_DIR.mkdir(exist_ok=True, parents=True)
-            write_json(auth_file, ui_cfg)
+        update_desired_vpn_exit_state(ui_cfg, "default", "running")
+        save_ui_config(ui_cfg)
         
         set_state(active_node_latency="清理连接", last_check_message="正在关闭与清理旧的 VPN 连接及网卡...")
         stop_active_openvpn()
@@ -5361,8 +5469,11 @@ function renderVpnExitTable() {
     row.style.cssText = "display:grid;grid-template-columns:minmax(100px,1fr) minmax(120px,1.2fr) 84px auto;gap:8px;align-items:center;padding:9px 10px;border-bottom:1px solid var(--border-color);font-size:12px;";
     const name = document.createElement("span");
     const criteria = [exitConfig.country || "所有国家", exitConfig.ip_type && exitConfig.ip_type !== "all" ? exitConfig.ip_type : "所有 IP"].join(" / ");
-    name.textContent = `${exitConfig.name || exitConfig.id} · ${criteria} ${exitConfig.running ? "(运行中)" : "(已停止)"}`;
-    name.style.color = exitConfig.running ? "var(--success)" : "var(--text-primary)";
+    const phaseLabels = {preparing:"准备中", connecting:"连接中", tunnel_ready:"隧道已建立", proxy_ready:"代理已就绪", healthy:"链路健康", stopping:"停止中", stopped:"已停止", failed:"异常", disabled:"已禁用"};
+    const phase = exitConfig.phase || (exitConfig.running ? "proxy_ready" : "stopped");
+    name.textContent = `${exitConfig.name || exitConfig.id} · ${criteria} (${phaseLabels[phase] || phase})`;
+    name.title = exitConfig.runtime && exitConfig.runtime.error ? exitConfig.runtime.error : name.textContent;
+    name.style.color = phase === "failed" ? "var(--danger)" : (["proxy_ready", "healthy"].includes(phase) ? "var(--success)" : "var(--text-primary)");
     const node = document.createElement("span");
     const source = vpnExitNodes.find(item => item.id === exitConfig.node_id);
     node.textContent = source ? (source.name || source.country || source.id) : (exitConfig.node_id || "未选择节点");
@@ -6349,8 +6460,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def is_authorized(self) -> bool:
         ui_cfg = load_ui_config()
-        pwd = ui_cfg.get("password")
-        if not pwd:
+        if not auth_security.has_password(ui_cfg):
             print("[Auth] 管理后台密码为空，已拒绝访问。请检查 ui_auth.json。", flush=True)
             return False
         
@@ -6372,6 +6482,20 @@ class Handler(BaseHTTPRequestHandler):
             if exp_time is not None and exp_time > time.time():
                 return True
         return False
+
+    def is_same_origin_request(self) -> bool:
+        fetch_site = self.headers.get("Sec-Fetch-Site", "").strip().lower()
+        if fetch_site == "cross-site":
+            return False
+        origin = self.headers.get("Origin", "").strip()
+        if not origin:
+            return True
+        try:
+            origin_parts = urllib.parse.urlsplit(origin)
+        except ValueError:
+            return False
+        request_host = self.headers.get("Host", "").strip().lower()
+        return origin_parts.scheme in {"http", "https"} and origin_parts.netloc.lower() == request_host
 
     def validate_path(self) -> str:
         secret_path = self.get_secret_path()
@@ -6483,12 +6607,14 @@ class Handler(BaseHTTPRequestHandler):
         elif effective_path == "/api/singbox/config":
             self.send_json({"ok": True, "nodes": [singbox_manager.redact_settings(node) for node in current_singbox_nodes()]})
         elif effective_path == "/api/singbox/combinations":
+            ui_cfg = load_ui_config()
             self.send_json({
                 "ok": True,
-                "nodes": [singbox_manager.redact_settings(node) for node in current_singbox_nodes()],
-                "exits": [vpn_exit_status(item) for item in current_vpn_exits()],
+                "nodes": [singbox_manager.redact_settings(node) for node in current_singbox_nodes(ui_cfg)],
+                "exits": [vpn_exit_view_status(item, ui_cfg) for item in current_vpn_exits(ui_cfg)],
             })
         elif effective_path == "/api/vpn-exits":
+            ui_cfg = load_ui_config()
             selectable_nodes = []
             for node in read_nodes():
                 selectable_nodes.append({
@@ -6503,7 +6629,7 @@ class Handler(BaseHTTPRequestHandler):
                 })
             self.send_json({
                 "ok": True,
-                "exits": [vpn_exit_status(item) for item in current_vpn_exits()],
+                "exits": [vpn_exit_view_status(item, ui_cfg) for item in current_vpn_exits(ui_cfg)],
                 "nodes": selectable_nodes,
             })
         elif effective_path == "/api/singbox/client_info":
@@ -6665,18 +6791,30 @@ class Handler(BaseHTTPRequestHandler):
         
         if effective_path == "/api/login":
             try:
+                client_ip = str(self.client_address[0])
+                if login_is_rate_limited(client_ip):
+                    self.send_json(
+                        {"ok": False, "error": "登录尝试过于频繁，请稍后重试"},
+                        HTTPStatus.TOO_MANY_REQUESTS,
+                    )
+                    return
                 payload = self.read_json_body()
                 input_pwd = str(payload.get("password") or "")
                 input_uname = str(payload.get("username") or "")
                 
                 ui_cfg = load_ui_config()
-                expected_pwd = ui_cfg.get("password", "")
+                expected_hash = ui_cfg.get("password_hash", "")
                 expected_uname = ui_cfg.get("username", "admin")
                 
-                if expected_pwd and input_pwd == expected_pwd and input_uname == expected_uname:
+                if auth_security.verify_password(input_pwd, expected_hash) and secrets.compare_digest(input_uname, expected_uname):
+                    record_login_result(client_ip, True)
                     token = uuid.uuid4().hex
                     with lock:
-                        active_sessions[token] = time.time() + 30 * 24 * 3600
+                        now = time.time()
+                        active_sessions[token] = now + SESSION_TTL_SECONDS
+                        for expired_token, expiry in list(active_sessions.items()):
+                            if expiry <= now:
+                                active_sessions.pop(expired_token, None)
                     body = json.dumps({"ok": True}).encode("utf-8")
                     self.send_response(HTTPStatus.OK)
                     self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -6684,10 +6822,15 @@ class Handler(BaseHTTPRequestHandler):
                     self.send_header("Cache-Control", "no-store")
                     secret_path = self.get_secret_path()
                     cookie_path = f"/{secret_path}/" if secret_path else "/"
-                    self.send_header("Set-Cookie", f"session={token}; Path={cookie_path}; HttpOnly; SameSite=Lax; Max-Age=2592000")
+                    secure_attr = "; Secure" if UI_COOKIE_SECURE else ""
+                    self.send_header(
+                        "Set-Cookie",
+                        f"session={token}; Path={cookie_path}; HttpOnly; SameSite=Strict; Max-Age={SESSION_TTL_SECONDS}{secure_attr}",
+                    )
                     self.end_headers()
                     self.wfile.write(body)
                 else:
+                    record_login_result(client_ip, False)
                     self.send_json({"ok": False, "error": "用户名或密码不正确，请重新输入"}, HTTPStatus.FORBIDDEN)
             except Exception as exc:
                 self.send_json({"ok": False, "error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
@@ -6714,7 +6857,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_header("Content-Type", "application/json; charset=utf-8")
                 self.send_header("Content-Length", str(len(body)))
                 self.send_header("Cache-Control", "no-store")
-                self.send_header("Set-Cookie", f"session=; Path={cookie_path}; HttpOnly; SameSite=Lax; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT")
+                secure_attr = "; Secure" if UI_COOKIE_SECURE else ""
+                self.send_header("Set-Cookie", f"session=; Path={cookie_path}; HttpOnly; SameSite=Strict; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT{secure_attr}")
                 self.end_headers()
                 self.wfile.write(body)
             except Exception as exc:
@@ -6723,6 +6867,9 @@ class Handler(BaseHTTPRequestHandler):
 
         if not self.is_authorized():
             self.send_json({"error": "Unauthorized"}, HTTPStatus.UNAUTHORIZED)
+            return
+        if not self.is_same_origin_request():
+            self.send_json({"error": "Cross-origin request rejected"}, HTTPStatus.FORBIDDEN)
             return
 
         if effective_path == "/api/vpn-exits/config":
@@ -7029,7 +7176,7 @@ class Handler(BaseHTTPRequestHandler):
                 new_suffix = str(payload.get("secret_path") or "").strip()
                 
                 ui_cfg = load_ui_config()
-                if not new_username or (not new_password and not ui_cfg.get("password")):
+                if not new_username or (not new_password and not auth_security.has_password(ui_cfg)):
                     self.send_json({"ok": False, "error": "用户名不能为空；首次设置时密码不能为空"}, HTTPStatus.BAD_REQUEST)
                     return
                 
@@ -7046,21 +7193,23 @@ class Handler(BaseHTTPRequestHandler):
                     return
 
                 expected_username = ui_cfg.get("username", "")
-                expected_password = ui_cfg.get("password", "")
+                expected_password_hash = ui_cfg.get("password_hash", "")
                 expected_port = ui_cfg.get("port", 8787)
                 expected_suffix = ui_cfg.get("secret_path", "EJsW2EeBo9lY")
 
+                password_changed = bool(
+                    new_password and not auth_security.verify_password(new_password, expected_password_hash)
+                )
                 ui_cfg["username"] = new_username
                 if new_password:
-                    ui_cfg["password"] = new_password
+                    auth_security.set_password(ui_cfg, new_password)
                 ui_cfg["port"] = new_port_int
                 ui_cfg["secret_path"] = new_suffix
                 
-                auth_file = DATA_DIR / "ui_auth.json"
-                reauth_required = new_username != expected_username or (new_password and new_password != expected_password)
+                reauth_required = new_username != expected_username or password_changed
                 with lock:
                     DATA_DIR.mkdir(exist_ok=True, parents=True)
-                    write_json(auth_file, ui_cfg)
+                    save_ui_config(ui_cfg)
                     if reauth_required:
                         active_sessions.clear()
                 
@@ -7157,10 +7306,7 @@ class Handler(BaseHTTPRequestHandler):
                 if routing_mode == "fixed_ip":
                     ui_cfg["fixed_node_id"] = fixed_node_id
                 
-                auth_file = DATA_DIR / "ui_auth.json"
-                with lock:
-                    DATA_DIR.mkdir(exist_ok=True, parents=True)
-                    write_json(auth_file, ui_cfg)
+                save_ui_config(ui_cfg)
 
                 if new_proxy_port_int != expected_proxy_port and any(node.get("enabled") and node.get("chain_enabled") for node in ui_cfg["singbox"].get("nodes", [])):
                     try:
@@ -7219,10 +7365,7 @@ class Handler(BaseHTTPRequestHandler):
                     ui_cfg["fixed_node_id"] = fixed_node_id
                 ui_cfg.pop("enable_force_country", None)
                 
-                auth_file = DATA_DIR / "ui_auth.json"
-                with lock:
-                    DATA_DIR.mkdir(exist_ok=True, parents=True)
-                    write_json(auth_file, ui_cfg)
+                save_ui_config(ui_cfg)
 
                 policy_message = enforce_active_node_allowed_by_routing(ui_cfg, "出站路由配置已更新")
                 
@@ -7250,10 +7393,7 @@ class Handler(BaseHTTPRequestHandler):
                     fav_ids.append(node_id)
                 
                 ui_cfg["favorite_node_ids"] = fav_ids
-                auth_file = DATA_DIR / "ui_auth.json"
-                with lock:
-                    DATA_DIR.mkdir(exist_ok=True, parents=True)
-                    write_json(auth_file, ui_cfg)
+                save_ui_config(ui_cfg)
 
                 policy_message = None
                 if ui_cfg.get("routing_mode") == "favorites":
@@ -7313,11 +7453,8 @@ class Handler(BaseHTTPRequestHandler):
         elif effective_path == "/api/disconnect":
             try:
                 ui_cfg = load_ui_config()
-                ui_cfg["connection_enabled"] = False
-                auth_file = DATA_DIR / "ui_auth.json"
-                with lock:
-                    DATA_DIR.mkdir(exist_ok=True, parents=True)
-                    write_json(auth_file, ui_cfg)
+                update_desired_vpn_exit_state(ui_cfg, "default", "stopped")
+                save_ui_config(ui_cfg)
                 
                 stop_active_openvpn()
                 with lock:
