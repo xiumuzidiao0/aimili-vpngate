@@ -131,6 +131,8 @@ SESSION_TTL_SECONDS = env_int("SESSION_TTL_SECONDS", 24 * 60 * 60, 300, 30 * 24 
 UI_COOKIE_SECURE = os.environ.get("UI_COOKIE_SECURE", "").strip().lower() in {"1", "true", "yes", "on"}
 LOGIN_ATTEMPT_WINDOW_SECONDS = 5 * 60
 LOGIN_ATTEMPT_LIMIT = 10
+RUNTIME_RECONCILE_SECONDS = env_int("RUNTIME_RECONCILE_SECONDS", 30, 5, 3600)
+RUNTIME_RETRY_MAX_SECONDS = env_int("RUNTIME_RETRY_MAX_SECONDS", 15 * 60, 30, 24 * 60 * 60)
 
 ROOT_DIR = Path(sys.executable).resolve().parent if globals().get("__compiled__") else Path(__file__).resolve().parent
 DATA_DIR = Path(os.environ["VPNGATE_DATA_DIR"]).resolve() if os.environ.get("VPNGATE_DATA_DIR") else ROOT_DIR / "vpngate_data"
@@ -155,6 +157,7 @@ vpn_exit_lock = threading.RLock()
 vpn_exit_proxy_ports: set[int] = set()
 vpn_exit_proxy_stops: dict[str, threading.Event] = {}
 vpn_exit_runtime_states: dict[str, dict[str, Any]] = {}
+vpn_exit_retry_states: dict[str, dict[str, float | int]] = {}
 is_connecting = False
 last_active_ping_time = 0.0
 last_active_latency = 0
@@ -674,9 +677,13 @@ def update_desired_vpn_exit_state(ui_cfg: dict[str, Any], exit_id: str, desired:
         ui_cfg["connection_enabled"] = desired == "running"
 
 
-def reconcile_declared_runtime(ui_cfg: dict[str, Any] | None = None) -> dict[str, Any]:
+def reconcile_declared_runtime(
+    ui_cfg: dict[str, Any] | None = None,
+    now: float | None = None,
+) -> dict[str, Any]:
     """Restore declared services after an AimiliVPN process or host restart."""
     ui_cfg = ui_cfg or load_ui_config()
+    current_time = time.time() if now is None else now
     desired_state = ui_cfg.get("desired_state", {})
     desired_exits = desired_state.get("vpn_exits", {}) if isinstance(desired_state, dict) else {}
     results: dict[str, Any] = {"singbox": {}, "vpn_exits": {}}
@@ -705,15 +712,53 @@ def reconcile_declared_runtime(ui_cfg: dict[str, Any] | None = None) -> dict[str
             continue
         try:
             if desired == "running" and exit_config.get("enabled"):
+                current_status = vpn_exit_status(exit_config)
+                retry = vpn_exit_retry_states.get(exit_id, {})
+                retry_at = float(retry.get("retry_at", 0))
+                if not current_status.get("running") and retry_at > current_time:
+                    results["vpn_exits"][exit_id] = {
+                        "ok": False,
+                        "desired": desired,
+                        "retry_at": retry_at,
+                        "error": current_status.get("runtime", {}).get("error", "等待自动重试"),
+                    }
+                    continue
                 status_result = start_vpn_exit(exit_id)
+                vpn_exit_retry_states.pop(exit_id, None)
             else:
-                status_result = vpn_exit_status(exit_config)
+                current_status = vpn_exit_status(exit_config)
+                if current_status.get("running"):
+                    status_result = stop_vpn_exit(exit_id)
+                else:
+                    status_result = current_status
+                vpn_exit_retry_states.pop(exit_id, None)
             results["vpn_exits"][exit_id] = {"ok": True, "desired": desired, "status": status_result}
         except Exception as exc:
             message = str(exc)
-            results["vpn_exits"][exit_id] = {"ok": False, "desired": desired, "error": message}
+            previous_failures = int(vpn_exit_retry_states.get(exit_id, {}).get("failures", 0))
+            failures = previous_failures + 1
+            delay = min(max(RUNTIME_RECONCILE_SECONDS, 30) * (2 ** min(failures - 1, 8)), RUNTIME_RETRY_MAX_SECONDS)
+            retry_at = current_time + delay
+            vpn_exit_retry_states[exit_id] = {"failures": failures, "retry_at": retry_at}
+            set_vpn_exit_runtime(exit_id, "retry_wait", error=message, retry_at=retry_at, failures=failures)
+            results["vpn_exits"][exit_id] = {
+                "ok": False,
+                "desired": desired,
+                "error": message,
+                "retry_at": retry_at,
+            }
             log_to_json("ERROR", "VPN", f"恢复 VPN 出口 {exit_id} 失败: {message}")
     return results
+
+
+def runtime_reconciler_loop(stop_event: threading.Event | None = None) -> None:
+    stop_event = stop_event or threading.Event()
+    while not stop_event.is_set():
+        try:
+            reconcile_declared_runtime()
+        except Exception as exc:
+            log_to_json("ERROR", "System", f"运行状态协调任务失败: {exc}")
+        stop_event.wait(RUNTIME_RECONCILE_SECONDS)
 
 
 def vpn_exit_status(exit_config: dict[str, Any]) -> dict[str, Any]:
@@ -885,6 +930,7 @@ def start_vpn_exit(exit_id: str) -> dict[str, Any]:
         try:
             connect_node(exit_config["node_id"])
             set_vpn_exit_runtime(exit_id, "healthy", node_id=exit_config["node_id"])
+            vpn_exit_retry_states.pop(exit_id, None)
         except Exception as exc:
             set_vpn_exit_runtime(exit_id, "failed", node_id=exit_config["node_id"], error=str(exc))
             raise
@@ -924,6 +970,7 @@ def start_vpn_exit(exit_id: str) -> dict[str, Any]:
                 pid=process.pid,
                 proxy_endpoint=f"127.0.0.1:{exit_config['proxy_port']}",
             )
+            vpn_exit_retry_states.pop(exit_id, None)
         except Exception as exc:
             stop_process(vpn_exit_processes.pop(exit_id, process))
             cleanup_policy_routing(exit_config["route_table"])
@@ -942,6 +989,7 @@ def stop_vpn_exit(exit_id: str) -> dict[str, Any]:
         set_vpn_exit_runtime(exit_id, "stopping")
         stop_active_openvpn()
         set_vpn_exit_runtime(exit_id, "stopped")
+        vpn_exit_retry_states.pop(exit_id, None)
     else:
         with vpn_exit_lock:
             set_vpn_exit_runtime(exit_id, "stopping")
@@ -950,6 +998,7 @@ def stop_vpn_exit(exit_id: str) -> dict[str, Any]:
             stop_vpn_exit_proxy(exit_id, exit_config["proxy_port"])
             (CONFIG_DIR / f"exit-{safe_name(exit_id)}.ovpn").unlink(missing_ok=True)
             set_vpn_exit_runtime(exit_id, "stopped")
+            vpn_exit_retry_states.pop(exit_id, None)
     return vpn_exit_status(exit_config)
 
 def singbox_api_status(ui_cfg: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -962,7 +1011,14 @@ def singbox_api_status(ui_cfg: dict[str, Any] | None = None) -> dict[str, Any]:
         str(node.get("vpn_exit_id") or "direct") for node in enabled_nodes
         if str(node.get("vpn_exit_id") or "direct") != "direct"
     }
-    missing_exits = [exit_id for exit_id in required_exits if not exits_by_id.get(exit_id, {}).get("running")]
+    missing_exits = [exit_id for exit_id in required_exits if exit_id not in exits_by_id]
+    unhealthy_exits = [
+        exit_id for exit_id in required_exits
+        if exit_id in exits_by_id and (
+            not exits_by_id[exit_id].get("running")
+            or exits_by_id[exit_id].get("phase") not in {"proxy_ready", "healthy"}
+        )
+    ]
     try:
         runtime = singbox_manager.status()
     except Exception as exc:
@@ -975,16 +1031,45 @@ def singbox_api_status(ui_cfg: dict[str, Any] | None = None) -> dict[str, Any]:
             "config_error": str(exc),
             "settings": {},
         }
-    chain_ready = bool(
-        has_enabled_node
-        and runtime.get("running")
-        and not missing_exits
-    )
+    chain_ready = bool(has_enabled_node and runtime.get("running") and not missing_exits and not unhealthy_exits)
+    if not has_enabled_node or not runtime.get("running"):
+        chain_state = "stopped"
+    elif missing_exits or unhealthy_exits:
+        chain_state = "degraded"
+    else:
+        chain_state = "healthy"
     runtime["chain_ready"] = chain_ready
-    runtime["chain_error"] = "" if chain_ready else (
-        "代理链未启用" if not has_enabled_node
-        else "等待 sing-box 服务或所选 VPNGate 出口就绪"
-    )
+    runtime["chain_state"] = chain_state
+    runtime["required_exits"] = sorted(required_exits)
+    runtime["missing_exits"] = sorted(missing_exits)
+    runtime["unhealthy_exits"] = sorted(unhealthy_exits)
+    if chain_ready:
+        runtime["chain_error"] = ""
+    elif not has_enabled_node:
+        runtime["chain_error"] = "代理链未启用"
+    elif not runtime.get("running"):
+        runtime["chain_error"] = "sing-box 服务未运行"
+    elif missing_exits:
+        runtime["chain_error"] = "所选 VPNGate 出口不存在"
+    else:
+        runtime["chain_error"] = "所选 VPNGate 出口尚未建立可用代理端口"
+    for node in nodes:
+        node["chain_state"] = "disabled"
+        node["chain_error"] = ""
+        if node.get("enabled") and node.get("chain_enabled"):
+            exit_id = str(node.get("vpn_exit_id") or "direct")
+            if exit_id == "direct":
+                node["chain_state"] = "healthy" if runtime.get("running") else "degraded"
+                node["chain_error"] = "" if runtime.get("running") else "sing-box 服务未运行"
+            elif exit_id not in exits_by_id:
+                node["chain_state"] = "degraded"
+                node["chain_error"] = "VPNGate 出口不存在"
+            elif exit_id in unhealthy_exits:
+                node["chain_state"] = "degraded"
+                node["chain_error"] = "VPNGate 出口代理端口未就绪"
+            else:
+                node["chain_state"] = "healthy" if runtime.get("running") else "degraded"
+                node["chain_error"] = "" if runtime.get("running") else "sing-box 服务未运行"
     runtime["nodes"] = [singbox_manager.redact_settings(node) for node in nodes]
     return runtime
 
@@ -5904,7 +5989,8 @@ function renderSingboxRuntime(runtime) {
     return;
   }
   const service = runtime.running ? "服务运行中" : "服务已停止";
-  const chain = runtime.chain_ready ? "代理链已就绪" : (runtime.chain_error || "代理链未就绪");
+  const stateLabel = { healthy: "健康", degraded: "降级", stopped: "已停止" }[runtime.chain_state] || "未就绪";
+  const chain = runtime.chain_ready ? `代理链已就绪（${stateLabel}）` : `${stateLabel}：${runtime.chain_error || "代理链未就绪"}`;
   statusEl.textContent = `${service}；${chain}`;
 }
 
@@ -7079,14 +7165,22 @@ class Handler(BaseHTTPRequestHandler):
                     {bounded_int(ui_cfg.get("port"), UI_PORT, 1, 65535), proxy_port},
                     {item["proxy_port"] for item in exits},
                 )
+                previous_ui_cfg = copy.deepcopy(ui_cfg)
                 ui_cfg["singbox"]["nodes"] = saved
                 ui_cfg["singbox"].update(saved[0])
-                save_ui_config(ui_cfg)
+                try:
+                    save_ui_config(ui_cfg)
+                except Exception:
+                    singbox_manager.restore_runtime_config()
+                    raise
                 action_result = None
                 if payload.get("apply", True):
-                    action_result = singbox_manager.service_action(
-                        "reload" if any(node["enabled"] and node["chain_enabled"] for node in saved) else "stop"
-                    )
+                    try:
+                        action = "reload" if any(node["enabled"] and node["chain_enabled"] for node in saved) else "stop"
+                        action_result = singbox_manager.apply_saved_config(action) if action == "reload" else singbox_manager.service_action(action)
+                    except singbox_manager.SingBoxError:
+                        save_ui_config(previous_ui_cfg)
+                        raise
                 self.send_json({
                     "ok": True,
                     "message": "节点组合已保存" + ("并已应用" if action_result else ""),
@@ -7625,9 +7719,8 @@ def main() -> None:
     threading.Thread(target=background_proxy_checker, daemon=True).start()
     threading.Thread(target=active_node_pinger, daemon=True).start()
     threading.Thread(
-        target=reconcile_declared_runtime,
-        args=(startup_cfg,),
-        name="runtime-reconciler-startup",
+        target=runtime_reconciler_loop,
+        name="runtime-reconciler",
         daemon=True,
     ).start()
     

@@ -1,5 +1,7 @@
 import base64
 import json
+import os
+import subprocess
 import tempfile
 import unittest
 import urllib.parse
@@ -181,6 +183,33 @@ class SingBoxManagerTests(unittest.TestCase):
         self.assertEqual(config["outbounds"][0]["server_port"], 7928)
         self.assertEqual(config["route"]["final"], "block")
         self.assertEqual(len(config["route"]["rules"]), 3)
+
+    def test_all_disabled_nodes_produce_a_valid_block_only_config(self):
+        node = singbox_manager.new_node(7928, "vless")
+        node["enabled"] = False
+        node["chain_enabled"] = False
+        normalized = singbox_manager.normalize_nodes([node], 7928, {8787, 7928})
+
+        config = singbox_manager.build_proxy_chain_nodes(normalized)
+
+        self.assertEqual(config["inbounds"], [])
+        self.assertEqual(config["route"]["rules"], [])
+        self.assertEqual(config["route"]["final"], "block")
+        self.assertEqual(config["outbounds"], [{"type": "block", "tag": "block"}])
+
+    def test_real_singbox_check_for_generated_chain_when_binary_is_configured(self):
+        binary = os.environ.get("SINGBOX_TEST_BIN")
+        if not binary or not os.path.isfile(binary):
+            self.skipTest("set SINGBOX_TEST_BIN to run the real sing-box integration check")
+        node = singbox_manager.new_node(7928, "vless")
+        node.update({"port": 4500, "vpn_exit_id": "direct", "enabled": True, "chain_enabled": True})
+        normalized = singbox_manager.normalize_nodes([node], 7928, {8787, 7928})
+        config = singbox_manager.build_proxy_chain_nodes(normalized)
+        with tempfile.TemporaryDirectory() as directory:
+            config_file = Path(directory) / "config.json"
+            config_file.write_text(json.dumps(config), encoding="utf-8")
+            result = subprocess.run([binary, "check", "-c", str(config_file)], capture_output=True, text=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
 
     def test_multiple_vpn_exits_get_separate_outbounds(self):
         first = singbox_manager.new_node(7928, "vless")

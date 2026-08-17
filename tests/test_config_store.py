@@ -146,6 +146,11 @@ class SingBoxRollbackTests(unittest.TestCase):
 
 
 class RuntimeReconciliationTests(unittest.TestCase):
+    def setUp(self):
+        vpngate_manager.vpn_exit_retry_states.clear()
+        vpngate_manager.vpn_exit_processes.clear()
+        vpngate_manager.vpn_exit_runtime_states.clear()
+
     def test_default_exit_desired_state_controls_connection_switch(self):
         ui_config = {
             "connection_enabled": True,
@@ -197,6 +202,65 @@ class RuntimeReconciliationTests(unittest.TestCase):
 
         service_action.assert_called_once_with("stop")
         self.assertTrue(result["singbox"]["ok"])
+
+    def test_reconcile_stops_extra_exit_declared_stopped(self):
+        exit_config = {"id": "usa", "enabled": True}
+        ui_config = {"desired_state": {"singbox": "stopped", "vpn_exits": {"usa": "stopped"}}}
+        with patch.object(singbox_manager, "status", return_value={"running": False}), \
+             patch.object(vpngate_manager, "current_vpn_exits", return_value=[exit_config]), \
+             patch.object(vpngate_manager, "vpn_exit_status", return_value={"running": True}), \
+             patch.object(vpngate_manager, "stop_vpn_exit", return_value={"running": False}) as stop_exit:
+            result = vpngate_manager.reconcile_declared_runtime(ui_config, now=100)
+
+        stop_exit.assert_called_once_with("usa")
+        self.assertTrue(result["vpn_exits"]["usa"]["ok"])
+
+    def test_reconcile_uses_exponential_retry_backoff(self):
+        exit_config = {"id": "usa", "enabled": True}
+        ui_config = {"desired_state": {"singbox": "stopped", "vpn_exits": {"usa": "running"}}}
+        with patch.object(singbox_manager, "status", return_value={"running": False}), \
+             patch.object(vpngate_manager, "current_vpn_exits", return_value=[exit_config]), \
+             patch.object(vpngate_manager, "vpn_exit_status", return_value={"running": False, "runtime": {}}), \
+             patch.object(vpngate_manager, "start_vpn_exit", side_effect=RuntimeError("unavailable")) as start_exit, \
+             patch.object(vpngate_manager, "log_to_json"):
+            first = vpngate_manager.reconcile_declared_runtime(ui_config, now=100)
+            second = vpngate_manager.reconcile_declared_runtime(ui_config, now=110)
+
+        self.assertEqual(start_exit.call_count, 1)
+        self.assertEqual(first["vpn_exits"]["usa"]["retry_at"], 130)
+        self.assertEqual(second["vpn_exits"]["usa"]["retry_at"], 130)
+        self.assertEqual(vpngate_manager.vpn_exit_retry_states["usa"]["failures"], 1)
+
+    def test_singbox_status_degrades_when_exit_process_is_running_but_proxy_is_not_ready(self):
+        ui_config = {
+            "singbox": {"nodes": [{"id": "node-a", "enabled": True, "chain_enabled": True, "vpn_exit_id": "usa"}]},
+            "vpn_exits": [{"id": "usa", "proxy_port": 7929}],
+        }
+        with patch.object(vpngate_manager, "current_singbox_nodes", return_value=ui_config["singbox"]["nodes"]), \
+             patch.object(vpngate_manager, "current_vpn_exits", return_value=ui_config["vpn_exits"]), \
+             patch.object(vpngate_manager, "vpn_exit_status", return_value={"id": "usa", "running": True, "phase": "tunnel_ready"}), \
+             patch.object(singbox_manager, "status", return_value={"running": True, "installed": True}):
+            status = vpngate_manager.singbox_api_status(ui_config)
+
+        self.assertFalse(status["chain_ready"])
+        self.assertEqual(status["chain_state"], "degraded")
+        self.assertEqual(status["unhealthy_exits"], ["usa"])
+        self.assertEqual(status["nodes"][0]["chain_state"], "degraded")
+
+    def test_singbox_status_is_healthy_with_proxy_ready_exit(self):
+        ui_config = {
+            "singbox": {"nodes": [{"id": "node-a", "enabled": True, "chain_enabled": True, "vpn_exit_id": "usa"}]},
+            "vpn_exits": [{"id": "usa", "proxy_port": 7929}],
+        }
+        with patch.object(vpngate_manager, "current_singbox_nodes", return_value=ui_config["singbox"]["nodes"]), \
+             patch.object(vpngate_manager, "current_vpn_exits", return_value=ui_config["vpn_exits"]), \
+             patch.object(vpngate_manager, "vpn_exit_status", return_value={"id": "usa", "running": True, "phase": "proxy_ready"}), \
+             patch.object(singbox_manager, "status", return_value={"running": True, "installed": True}):
+            status = vpngate_manager.singbox_api_status(ui_config)
+
+        self.assertTrue(status["chain_ready"])
+        self.assertEqual(status["chain_state"], "healthy")
+        self.assertEqual(status["nodes"][0]["chain_state"], "healthy")
 
 
 if __name__ == "__main__":

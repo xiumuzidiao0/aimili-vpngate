@@ -546,8 +546,6 @@ def normalize_nodes(
 
 def build_proxy_chain_nodes(nodes: list[dict[str, Any]]) -> dict[str, Any]:
     active_nodes = [node for node in nodes if node["enabled"] and node["chain_enabled"]]
-    if not active_nodes:
-        raise SingBoxError("至少需要启用一个协议节点")
     inbounds: list[dict[str, Any]] = []
     outbounds: list[dict[str, Any]] = []
     rules: list[dict[str, Any]] = []
