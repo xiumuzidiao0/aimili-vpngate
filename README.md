@@ -62,15 +62,15 @@ bash <(curl -Ls https://raw.githubusercontent.com/xiumuzidiao0/aimili-vpngate/ma
 
 ### 🔗 sing-box 节点与组合
 
-安装脚本会一并部署 sing-box。登录 Web UI 后，在“管理员 -> sing-box 节点”中独立管理协议节点，在“管理员 -> VPN 出口”中管理 VPNGate 出口，再通过“管理员 -> 节点组合”选择每个 sing-box 节点使用主机网络或哪个 VPNGate 出口。客户端地址默认自动填入服务器公网 IP，也可改为自己的域名。
+安装脚本会一并部署 sing-box。登录 Web UI 后，顶部提供“总览 / sing-box 节点 / VPNGate 出口 / 节点组合”四个独立页面：协议节点、VPNGate 出口和绑定关系各自管理，避免把运行状态和配置操作混在一个弹窗中。客户端地址默认自动填入服务器公网 IP，也可改为自己的域名。
 
-当前 Web UI 支持将多个协议节点同时加入、编辑、删除和启停：VLESS-REALITY、VLESS、VMess、Trojan、Shadowsocks、SOCKS5、HTTP、TUIC、Hysteria2、AnyTLS。每个节点都有独立端口和复制链接按钮，新节点默认走主机网络。
+当前 Web UI 支持将多个协议节点同时加入、编辑、删除和启停：VLESS-REALITY、VLESS、VMess、Trojan、Shadowsocks、SOCKS5、HTTP、TUIC、Hysteria2、AnyTLS。每个节点都有独立名称、端口、脱敏链接、复制和本机生成的二维码，也可批量导出；新节点默认走主机网络。
 
 ```text
 VLESS-REALITY 客户端 -> sing-box -> 127.0.0.1:7928 -> OpenVPN tun0 -> VPNGate 节点
 ```
 
-在“管理员 -> VPN 出口”中可增加独立出口，例如 `127.0.0.1:7929 -> tun1 -> VPNGate 美国节点`，然后在 sing-box 节点中选择该出口。因此客户端 A 和 B 可以分别使用不同 VPNGate 国家出口，但不会形成 VPN 到 VPN 的串联。所有 `7928/7929` 类端口均只监听本机回环地址，不需要也不应在防火墙或安全组中对公网放行；只放行 Web UI 端口和 sing-box 公网入口端口。
+在“VPNGate 出口”中可按国家、IP 类型、延迟、速度和可用性筛选节点并增加独立出口，例如 `127.0.0.1:7929 -> tun1 -> VPNGate 美国节点`。然后在“节点组合”中逐个或批量绑定出口，并在应用前预览变更。因此客户端 A 和 B 可以分别使用不同 VPNGate 国家出口，但不会形成 VPN 到 VPN 的串联。所有 `7928/7929` 类端口均只监听本机回环地址，不需要也不应在防火墙或安全组中对公网放行；只放行 Web UI 端口和 sing-box 公网入口端口。
 
 * **🐍 Python 脚本中使用代理**:
   ```python
@@ -199,9 +199,9 @@ To prevent unauthorized scanning and abuse of the proxy port on the public inter
 
 ### 🔗 sing-box Nodes and Combinations
 
-The installer also deploys sing-box. In the Web UI, use `Admin -> sing-box Nodes` for protocol CRUD, `Admin -> VPN Exits` for VPNGate exits, and `Admin -> Node Combinations` to choose host networking or a VPNGate exit for each sing-box node. The server public IP is filled in automatically and can be replaced with a domain name.
+The installer also deploys sing-box. The Web UI exposes four top-level workspaces: Overview, sing-box Nodes, VPNGate Exits, and Node Combinations. Protocol nodes, exits, and bindings are managed independently. The server public IP is filled in automatically and can be replaced with a domain name.
 
-The Web UI can add, edit, delete, and enable multiple protocol nodes at the same time: VLESS-REALITY, VLESS, VMess, Trojan, Shadowsocks, SOCKS5, HTTP, TUIC, Hysteria2, and AnyTLS. Each node has its own port and copy-link control, and new nodes use the host network by default.
+The Web UI can add, edit, delete, and enable multiple protocol nodes at the same time: VLESS-REALITY, VLESS, VMess, Trojan, Shadowsocks, SOCKS5, HTTP, TUIC, Hysteria2, and AnyTLS. Each node has a unique name and port, masked link controls, a locally generated QR code, and batch export. New nodes use the host network by default.
 
 ```text
 VLESS-REALITY client -> sing-box -> 127.0.0.1:7928 -> OpenVPN tun0 -> VPNGate node

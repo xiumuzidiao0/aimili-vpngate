@@ -1073,6 +1073,27 @@ def singbox_api_status(ui_cfg: dict[str, Any] | None = None) -> dict[str, Any]:
     runtime["nodes"] = [singbox_manager.redact_settings(node) for node in nodes]
     return runtime
 
+
+def singbox_qr_png(node: dict[str, Any]) -> bytes:
+    uri = singbox_manager.client_info(node).get("uri", "")
+    if not uri:
+        raise singbox_manager.SingBoxError("节点链接不可用")
+    encoded = uri.encode("utf-8")
+    if len(encoded) > 8192:
+        raise singbox_manager.SingBoxError("节点链接过长，无法生成二维码")
+    result = subprocess.run(
+        ["qrencode", "-t", "PNG", "-s", "7", "-m", "2", "-o", "-"],
+        input=encoded,
+        capture_output=True,
+        timeout=5,
+        check=False,
+    )
+    if result.returncode != 0 or not result.stdout.startswith(b"\x89PNG\r\n\x1a\n"):
+        error = result.stderr.decode("utf-8", errors="replace").strip()
+        raise singbox_manager.SingBoxError(error or "二维码生成失败")
+    return result.stdout
+
+
 def safe_name(value: str) -> str:
     value = re.sub(r"[^A-Za-z0-9_.-]+", "_", value.strip())
     return value.strip("._") or "node"
@@ -3868,14 +3889,142 @@ INDEX_HTML = r"""<!doctype html>
     .ui-toast.error { border-color: rgba(244,63,94,.55); color: #fecdd3; }
     .ui-toast.warning { border-color: rgba(245,158,11,.55); color: #fde68a; }
     .copy-btn { white-space: nowrap; }
+    .qr-placeholder {
+      width: 240px;
+      min-height: 240px;
+      margin: 0 auto;
+      display: grid;
+      place-items: center;
+      padding: 18px;
+      border: 1px dashed var(--border-color);
+      border-radius: 8px;
+      color: var(--text-secondary);
+      font-size: 12px;
+      line-height: 1.5;
+      overflow-wrap: anywhere;
+      background: #fff;
+    }
+
+    .primary-nav {
+      display: flex;
+      gap: 6px;
+      margin-bottom: 18px;
+      padding: 5px;
+      border: 1px solid var(--border-color);
+      border-radius: 8px;
+      background: rgba(22, 30, 49, 0.55);
+      overflow-x: auto;
+    }
+    .primary-nav button {
+      min-width: max-content;
+      height: 36px;
+      padding: 0 14px;
+      border: 0;
+      border-radius: 6px;
+      background: transparent;
+      color: var(--text-secondary);
+      font: inherit;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .primary-nav button[aria-current="page"] {
+      background: rgba(99, 102, 241, 0.18);
+      color: var(--text-primary);
+    }
+    .overview-workspace {
+      display: grid;
+      grid-template-columns: minmax(0, 1.6fr) minmax(280px, 0.8fr);
+      gap: 14px;
+      margin-bottom: 18px;
+    }
+    .workspace-panel {
+      min-width: 0;
+      padding: 16px;
+      border: 1px solid var(--border-color);
+      border-radius: 8px;
+      background: rgba(22, 30, 49, 0.58);
+    }
+    .workspace-panel h2 {
+      margin: 0 0 12px;
+      color: var(--text-primary);
+      font-size: 14px;
+      letter-spacing: 0;
+    }
+    .chain-route, .attention-item {
+      display: grid;
+      gap: 5px;
+      padding: 10px 0;
+      border-top: 1px solid var(--border-color);
+      font-size: 12px;
+    }
+    .chain-route:first-child, .attention-item:first-child { border-top: 0; }
+    .chain-route-main {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-width: 0;
+    }
+    .chain-route-path {
+      overflow-wrap: anywhere;
+      color: var(--text-secondary);
+      line-height: 1.5;
+    }
+    .attention-item {
+      grid-template-columns: minmax(0, 1fr) auto;
+      align-items: center;
+    }
+    .empty-state {
+      padding: 16px 0;
+      color: var(--text-secondary);
+      font-size: 12px;
+      line-height: 1.5;
+    }
+    body[data-view="singbox"] #overview_page,
+    body[data-view="vpn-exits"] #overview_page,
+    body[data-view="combinations"] #overview_page { display: none; }
+    body[data-view="singbox"] #singbox_modal,
+    body[data-view="vpn-exits"] #vpn_exits_modal,
+    body[data-view="combinations"] #singbox_combinations_modal {
+      display: block !important;
+      position: static;
+      width: 100%;
+      height: auto;
+      overflow: visible;
+      background: transparent;
+      backdrop-filter: none;
+    }
+    .primary-page .modal-content {
+      width: 100% !important;
+      max-width: none !important;
+      max-height: none !important;
+      overflow: visible !important;
+      padding: 22px !important;
+      border-radius: 8px;
+      box-shadow: none;
+      animation: none;
+    }
 
     @media (max-width: 760px) {
       .overview-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .overview-workspace { grid-template-columns: minmax(0, 1fr); }
+      .primary-nav { margin-inline: -4px; }
       .modal-content { width: calc(100% - 20px) !important; max-height: 92vh !important; padding: 20px !important; border-radius: 14px; }
+      .primary-page .modal-content { width: 100% !important; max-height: none !important; padding: 16px !important; border-radius: 8px; }
       #sb_node_table > div, #vpn_exit_table > div, #singbox_combinations_table > div { grid-template-columns: minmax(0, 1fr) !important; gap: 7px !important; }
       #sb_node_table > div > span:last-child, #vpn_exit_table > div > span:last-child { justify-content: flex-start !important; }
       #sb_node_links > div { grid-template-columns: minmax(0, 1fr) !important; }
       #sb_node_links input { min-width: 0; }
+      #singbox_qr_modal .modal-content { width: calc(100% - 28px) !important; }
+      .qr-placeholder { width: min(240px, 75vw); min-height: min(240px, 75vw); }
+      .table-container { overflow: visible; }
+      .table-container table, .table-container tbody, .table-container tr, .table-container td { display: block; width: 100%; }
+      .table-container thead { display: none; }
+      .table-container tbody { display: grid; gap: 10px; }
+      .table-container tr { padding: 12px; border: 1px solid var(--border-color); border-radius: 8px; background: rgba(22,30,49,.45); }
+      .table-container td { min-height: 30px; padding: 6px 0 6px 92px !important; border: 0 !important; position: relative; white-space: normal !important; max-width: none !important; overflow-wrap: anywhere; }
+      .table-container td::before { content: attr(data-label); position: absolute; left: 0; top: 7px; width: 82px; color: var(--text-secondary); font-size: 11px; }
+      .table-container .table-actions { justify-content: flex-start; flex-wrap: wrap; }
     }
     @media (max-width: 420px) {
       .overview-strip { grid-template-columns: 1fr; }
@@ -3895,7 +4044,7 @@ INDEX_HTML = r"""<!doctype html>
     }
   </style>
 </head>
-<body>
+<body data-view="overview">
 <header>
   <div class="brand">
     <h1>
@@ -3913,8 +4062,8 @@ INDEX_HTML = r"""<!doctype html>
         <svg xmlns="http://www.w3.org/2000/svg" style="width:12px; height:12px; margin-left: 2px;" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="3"><path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7" /></svg>
       </button>
       <div id="github_dropdown" class="dropdown-content">
-        <a href="https://github.com/baoweise-bot/aimili-vpngate" target="_blank">正式版</a>
-        <a href="https://github.com/baoweise-bot/aimili-vpngate/tree/bate" target="_blank">测试版</a>
+        <a href="https://github.com/xiumuzidiao0/aimili-vpngate" target="_blank" rel="noopener noreferrer">正式版</a>
+        <a href="https://github.com/xiumuzidiao0/aimili-vpngate/tree/bate" target="_blank" rel="noopener noreferrer">测试版</a>
       </div>
     </div>
     <a href="https://t.me/arestemple" target="_blank" class="btn-telegram">
@@ -3973,9 +4122,26 @@ INDEX_HTML = r"""<!doctype html>
     <div class="overview-item"><div class="overview-label">sing-box</div><div class="overview-value" id="overview_singbox">读取中...</div></div>
     <div class="overview-item"><div class="overview-label">代理链</div><div class="overview-value" id="overview_chain">读取中...</div></div>
     <div class="overview-item"><div class="overview-label">VPNGate 出口</div><div class="overview-value" id="overview_exits">读取中...</div></div>
-    <div class="overview-item"><div class="overview-label">数据更新时间</div><div class="overview-value" id="overview_updated">读取中...</div></div>
+    <div class="overview-item"><div class="overview-label">配置</div><div class="overview-value" id="overview_updated">读取中...</div></div>
   </section>
+  <nav class="primary-nav" id="primary_nav" aria-label="主要页面">
+    <button type="button" data-view-target="overview" aria-current="page" onclick="openOverviewPage()">总览</button>
+    <button type="button" data-view-target="singbox" onclick="openSingboxModal()">sing-box 节点</button>
+    <button type="button" data-view-target="vpn-exits" onclick="openVpnExitsModal()">VPNGate 出口</button>
+    <button type="button" data-view-target="combinations" onclick="openSingboxCombinationsModal()">节点组合</button>
+  </nav>
   <div id="ui_toast" class="ui-toast" role="status" aria-live="polite"></div>
+  <div id="overview_page">
+    <section class="overview-workspace" aria-label="链路总览">
+      <div class="workspace-panel">
+        <h2>当前客户端链路</h2>
+        <div id="overview_routes" aria-live="polite"><div class="empty-state">正在读取链路...</div></div>
+      </div>
+      <div class="workspace-panel">
+        <h2>待处理事项</h2>
+        <div id="overview_attention" aria-live="polite"><div class="empty-state">正在检查...</div></div>
+      </div>
+    </section>
   
     <!-- 当前连接活动节点卡片 -->
     <section class="active-node-section" id="active_node_card" style="margin-bottom: 24px;">
@@ -4064,6 +4230,8 @@ INDEX_HTML = r"""<!doctype html>
         <button id="btn_last_page" class="connect-btn" style="height: 32px; padding: 0 10px;">尾页</button>
       </div>
     </div>
+  </div>
+
   </div>
 
   <!-- Credentials Modal (网页安全设置) -->
@@ -4194,7 +4362,7 @@ INDEX_HTML = r"""<!doctype html>
 
 
   <!-- sing-box proxy chain modal -->
-  <div id="singbox_modal" class="modal">
+  <div id="singbox_modal" class="modal primary-page" aria-label="sing-box 节点页面">
     <div class="modal-content" style="max-width: 640px; width: 94%; max-height: 88vh; overflow-y: auto;">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:18px;">
         <div><h3 style="margin:0;font-size:18px;color:var(--text-primary);">sing-box 节点</h3><div id="singbox_runtime_status" style="font-size:12px;color:var(--text-secondary);margin-top:5px;">正在读取服务状态...</div><div id="singbox_dirty_status" style="display:none;color:var(--warning);font-size:12px;margin-top:5px;">有未保存变更</div></div>
@@ -4214,10 +4382,14 @@ INDEX_HTML = r"""<!doctype html>
           <label class="form-label" style="display:flex;align-items:center;gap:8px;margin:0;"><input id="sb_enabled" type="checkbox"> 启用 sing-box 入口</label>
           <label class="form-label" style="display:flex;align-items:center;gap:8px;margin:0;"><input id="sb_chain_enabled" type="checkbox"> 启用出站流量</label>
         </div>
-        <div style="display:flex;gap:8px;align-items:center;margin-bottom:16px;">
+        <div style="display:flex;gap:8px;align-items:center;margin-bottom:10px;">
           <select id="sb_node_select" class="input-field" onchange="selectSingboxNode(this.value)" style="flex:1;"></select>
           <button type="button" class="connect-btn" title="新增协议节点" onclick="addSingboxNode()">新增</button>
           <button type="button" class="test-btn" title="删除当前协议节点" onclick="deleteSingboxNode()">删除</button>
+        </div>
+        <div style="display:flex;gap:8px;align-items:center;margin-bottom:16px;">
+          <input id="sb_node_search" class="input-field" type="search" placeholder="搜索节点名称、协议或端口" oninput="renderSingboxNodeTable()" aria-label="搜索 sing-box 节点">
+          <button type="button" class="connect-btn" onclick="exportSingboxLinks('text')" title="批量导出当前节点链接">导出文本</button><button type="button" class="connect-btn" onclick="exportSingboxLinks('json')" title="批量导出 JSON">导出 JSON</button>
         </div>
         <div id="sb_node_table" style="margin:-4px 0 16px;border:1px solid var(--border-color);border-radius:6px;overflow:hidden;"></div>
         <div class="form-group" style="margin-bottom:12px;"><label class="form-label" for="sb_name">节点名称</label><input id="sb_name" type="text" class="input-field" maxlength="80" required placeholder="例如：VLESS-日本主机"></div>
@@ -4249,16 +4421,16 @@ INDEX_HTML = r"""<!doctype html>
           <div class="mono" style="padding:10px 12px;background:rgba(255,255,255,0.03);border:1px solid var(--border-color);border-radius:6px;">direct -> 主机网络</div>
           <div style="font-size:12px;color:var(--text-secondary);line-height:1.45;margin-top:8px;">sing-box 节点默认使用主机网络。需要经过 VPNGate 时，请在“节点组合”页面单独绑定 VPNGate 出口。</div>
         </div>
-        <div class="form-group" style="margin:16px 0 10px;"><label class="form-label" for="sb_client_uri">当前节点客户端导入链接</label><textarea id="sb_client_uri" class="input-field" rows="3" readonly placeholder="保存配置并填写客户端服务器地址后生成"></textarea></div>
-        <button type="button" class="connect-btn" style="margin-bottom:16px;" onclick="loadSingboxClientInfo()">刷新客户端导入链接</button>
+        <div class="form-group" style="margin:16px 0 10px;"><label class="form-label" for="sb_client_uri">当前节点客户端导入链接（默认隐藏）</label><div style="display:flex;gap:8px;align-items:center;"><input id="sb_client_uri" class="input-field mono" type="password" readonly placeholder="保存配置并填写客户端服务器地址后生成"><button type="button" class="connect-btn" onclick="toggleSingboxLinkVisibility('sb_client_uri', this)">显示</button></div></div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px;"><button type="button" class="connect-btn" onclick="loadSingboxClientInfo()">刷新链接</button><button type="button" class="connect-btn" onclick="copyCurrentSingboxLink()">复制当前链接</button><button type="button" class="connect-btn" onclick="showSingboxQr()">二维码</button></div>
         <div id="sb_node_links" style="display:grid;gap:8px;margin-bottom:16px;"></div>
-        <div style="display:flex;gap:12px;justify-content:flex-end;"><button type="button" onclick="closeSingboxModal()" style="height:40px;padding:0 16px;font-weight:600;border-radius:8px;border:1px solid var(--border-color);background:transparent;color:var(--text-secondary);cursor:pointer;">取消</button><button type="submit" id="singbox_submit_btn" class="btn-primary" style="height:40px;padding:0 20px;font-weight:600;border-radius:8px;">保存并应用</button></div>
+        <div style="display:flex;gap:12px;justify-content:flex-end;flex-wrap:wrap;"><button type="button" onclick="closeSingboxModal()" style="height:40px;padding:0 16px;font-weight:600;border-radius:8px;border:1px solid var(--border-color);background:transparent;color:var(--text-secondary);cursor:pointer;">取消</button><button type="button" class="connect-btn" onclick="saveSingboxConfig(null, false)">仅保存</button><button type="submit" id="singbox_submit_btn" class="btn-primary" style="height:40px;padding:0 20px;font-weight:600;border-radius:8px;">保存并应用</button></div>
       </form>
     </div>
   </div>
 
   <!-- VPN exit modal -->
-  <div id="vpn_exits_modal" class="modal">
+  <div id="vpn_exits_modal" class="modal primary-page" aria-label="VPNGate 出口页面">
     <div class="modal-content" style="max-width:720px;width:94%;max-height:88vh;overflow-y:auto;">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:18px;">
         <div><h3 style="margin:0;font-size:18px;color:var(--text-primary);">VPN 出口</h3><div style="font-size:12px;color:var(--text-secondary);margin-top:5px;">每个出口使用独立本地端口与 VPNGate 隧道。</div></div>
@@ -4276,6 +4448,8 @@ INDEX_HTML = r"""<!doctype html>
           <div class="form-group" style="margin-bottom:12px;"><label class="form-label" for="ve_country">国家/地区筛选</label><select id="ve_country" class="input-field" onchange="filterVpnExitNodes()"><option value="">所有国家</option></select></div>
           <div class="form-group" style="margin-bottom:12px;"><label class="form-label" for="ve_ip_type">IP 类型筛选</label><select id="ve_ip_type" class="input-field" onchange="filterVpnExitNodes()"><option value="all">所有 IP 类型</option><option value="residential">住宅 IP</option><option value="hosting">机房 IP</option></select></div>
         </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px;"><div class="form-group" style="margin:0;"><label class="form-label" for="ve_max_ping">最大延迟（毫秒）</label><input id="ve_max_ping" type="number" class="input-field" min="0" placeholder="不限" oninput="filterVpnExitNodes()"></div><div class="form-group" style="margin:0;"><label class="form-label" for="ve_min_speed">最低速度（Mbps）</label><input id="ve_min_speed" type="number" class="input-field" min="0" placeholder="不限" oninput="filterVpnExitNodes()"></div></div>
+        <div style="display:flex;gap:14px;align-items:center;flex-wrap:wrap;margin-bottom:16px;"><label class="form-label" style="display:flex;align-items:center;gap:8px;margin:0;"><input id="ve_available_only" type="checkbox" onchange="filterVpnExitNodes()"> 只显示可用节点</label><label class="form-label" style="display:flex;align-items:center;gap:8px;margin:0;">排序 <select id="ve_sort" class="input-field" style="width:auto;min-width:150px;" onchange="filterVpnExitNodes()"><option value="balanced">可用性优先</option><option value="ping">延迟最低</option><option value="speed">速度最高</option><option value="uptime">会话数最高</option></select></label></div>
         <div class="form-group" style="margin-bottom:12px;"><label class="form-label" for="ve_node">VPNGate 节点</label><select id="ve_node" class="input-field"></select></div>
         <label class="form-label" style="display:flex;align-items:center;gap:8px;margin:0 0 16px;"><input id="ve_enabled" type="checkbox" checked> 启用此出口</label>
         <div style="display:flex;gap:8px;justify-content:flex-end;"><button type="button" class="connect-btn" onclick="addVpnExit()">新增出口</button><button type="submit" class="btn-primary" id="vpn_exit_submit_btn">保存出口配置</button></div>
@@ -4284,7 +4458,7 @@ INDEX_HTML = r"""<!doctype html>
   </div>
 
   <!-- sing-box and VPNGate combination modal -->
-  <div id="singbox_combinations_modal" class="modal">
+  <div id="singbox_combinations_modal" class="modal primary-page" aria-label="节点组合页面">
     <div class="modal-content" style="max-width:760px;width:94%;max-height:88vh;overflow-y:auto;">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:18px;">
         <div><h3 style="margin:0;font-size:18px;color:var(--text-primary);">节点组合</h3><div style="font-size:12px;color:var(--text-secondary);margin-top:5px;">把 sing-box 节点绑定到主机网络或指定 VPNGate 出口。</div><div id="singbox_combinations_dirty" style="display:none;color:var(--warning);font-size:12px;margin-top:5px;">有未应用变更</div></div>
@@ -4292,10 +4466,13 @@ INDEX_HTML = r"""<!doctype html>
       </div>
       <div id="singbox_combinations_error" style="color:var(--danger);font-size:13px;margin-bottom:12px;padding:8px 12px;background:rgba(244,63,94,0.1);border:1px solid rgba(244,63,94,0.2);border-radius:6px;display:none;"></div>
       <div id="singbox_combinations_success" style="color:var(--success);font-size:13px;margin-bottom:12px;padding:8px 12px;background:rgba(16,185,129,0.1);border:1px solid rgba(16,185,129,0.2);border-radius:6px;display:none;"></div>
-      <div id="singbox_combinations_table" style="border:1px solid var(--border-color);border-radius:6px;overflow:hidden;margin-bottom:16px;"></div>
-      <div style="display:flex;justify-content:flex-end;gap:8px;"><button type="button" class="connect-btn" onclick="refreshSingboxCombinations()">刷新</button><button type="button" class="btn-primary" id="singbox_combinations_save" onclick="saveSingboxCombinations()">保存并应用</button></div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px;"><button type="button" class="connect-btn" onclick="selectAllCombinationNodes(true)">全选节点</button><button type="button" class="connect-btn" onclick="selectAllCombinationNodes(false)">清空选择</button><select id="combination_batch_exit" class="input-field" style="width:auto;min-width:180px;"></select><button type="button" class="connect-btn" onclick="applyCombinationBatch()">批量绑定</button></div>
+      <div id="singbox_combinations_table" style="border:1px solid var(--border-color);border-radius:6px;overflow:hidden;margin-bottom:12px;"></div><div id="combination_preview" class="workspace-panel" style="display:none;margin-bottom:16px;"></div>
+      <div style="display:flex;justify-content:flex-end;gap:8px;flex-wrap:wrap;"><button type="button" class="connect-btn" onclick="refreshSingboxCombinations()">刷新</button><button type="button" class="connect-btn" onclick="previewSingboxCombinations()">预览变更</button><button type="button" class="btn-primary" id="singbox_combinations_save" onclick="saveSingboxCombinations()">保存并应用</button></div>
     </div>
   </div>
+
+  <div id="singbox_qr_modal" class="modal" role="dialog" aria-modal="true" aria-label="节点二维码"><div class="modal-content" style="max-width:380px;text-align:center;"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;"><h3 style="margin:0;font-size:18px;">节点二维码</h3><button type="button" onclick="closeSingboxQr()" class="connect-btn" title="关闭">关闭</button></div><div id="singbox_qr_name" style="font-size:13px;color:var(--text-secondary);margin-bottom:12px;"></div><div id="singbox_qr_image" class="qr-placeholder">二维码将在本机生成</div><button type="button" class="btn-primary" style="margin-top:16px;" onclick="copySingboxQrLink()">复制链接</button></div></div>
 
   <!-- VPS 购买推荐 Modal -->
   <div id="vps_recommend_modal" class="modal">
@@ -4463,11 +4640,29 @@ function speed(v){return v?`${(v*8/1000/1000).toFixed(1)} Mbps`:"-"}
 
 let toastTimer = null;
 async function apiFetch(path, options = {}) {
-  const response = await fetch(path, { credentials: "same-origin", ...options });
+  const controller = new AbortController();
+  const timeoutMs = Number(options.timeoutMs || 15000);
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  const method = String(options.method || "GET").toUpperCase();
+  const headers = new Headers(options.headers || {});
+  if (!["GET", "HEAD"].includes(method) && !headers.has("X-Request-ID")) {
+    headers.set("X-Request-ID", crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`);
+  }
+  let response;
+  try {
+    response = await fetch(path, { credentials: "same-origin", ...options, method, headers, signal: options.signal || controller.signal });
+  } catch (error) {
+    if (error && error.name === "AbortError") throw new Error(`请求超时（${Math.round(timeoutMs / 1000)} 秒）`);
+    throw new Error("网络连接失败，请检查管理服务是否运行");
+  } finally {
+    clearTimeout(timeoutId);
+  }
   let data = null;
   try { data = await response.json(); } catch (_) {}
   if (!response.ok || (data && data.ok === false)) {
-    const error = new Error((data && data.error) || `请求失败（${response.status}）`);
+    if (response.status === 401) setTimeout(() => window.location.reload(), 300);
+    const fallback = response.status === 401 ? "登录已失效，正在返回登录页" : (response.status === 403 ? "当前账号无权执行此操作" : (response.status === 429 ? "操作过于频繁，请稍后重试" : `请求失败（${response.status}）`));
+    const error = new Error((data && data.error) || fallback);
     error.status = response.status;
     error.data = data;
     throw error;
@@ -4491,6 +4686,116 @@ function setOverviewValue(id, value, stateName = "") {
   element.dataset.state = stateName;
 }
 
+const PRIMARY_VIEWS = new Set(["overview", "singbox", "vpn-exits", "combinations"]);
+
+function currentPrimaryView() {
+  return PRIMARY_VIEWS.has(document.body.dataset.view) ? document.body.dataset.view : "overview";
+}
+
+function confirmLeavePrimaryView(nextView) {
+  const current = currentPrimaryView();
+  if (current === nextView) return true;
+  if (current === "singbox" && typeof singboxDirty !== "undefined" && singboxDirty && !confirm("sing-box 节点有未保存变更，确定离开吗？")) return false;
+  if (current === "vpn-exits" && typeof vpnExitsDirty !== "undefined" && vpnExitsDirty && !confirm("VPNGate 出口有未保存变更，确定离开吗？")) return false;
+  if (current === "combinations" && typeof combinationDirty !== "undefined" && combinationDirty && !confirm("节点组合有未应用变更，确定离开吗？")) return false;
+  return true;
+}
+
+function setPrimaryView(view, updateHistory = true) {
+  if (!PRIMARY_VIEWS.has(view)) view = "overview";
+  if (!confirmLeavePrimaryView(view)) return false;
+  document.body.dataset.view = view;
+  document.querySelectorAll(".primary-page").forEach(page => page.style.removeProperty("display"));
+  document.querySelectorAll("[data-view-target]").forEach(button => {
+    if (button.dataset.viewTarget === view) button.setAttribute("aria-current", "page");
+    else button.removeAttribute("aria-current");
+  });
+  const dropdown = $("admin_dropdown");
+  if (dropdown) dropdown.style.display = "none";
+  const nextHash = `#/${view}`;
+  if (updateHistory && window.location.hash !== nextHash) history.pushState({ view }, "", nextHash);
+  window.scrollTo({ top: 0, behavior: "auto" });
+  return true;
+}
+
+function openOverviewPage(updateHistory = true) {
+  return setPrimaryView("overview", updateHistory);
+}
+
+function renderOperationsOverview(singbox, exits) {
+  const routes = $("overview_routes");
+  const attention = $("overview_attention");
+  if (!routes || !attention || !singbox || !Array.isArray(exits)) return;
+  const nodes = Array.isArray(singbox.nodes) ? singbox.nodes : [];
+  const exitsById = new Map(exits.map(item => [item.id, item]));
+  routes.innerHTML = "";
+  for (const node of nodes) {
+    const row = document.createElement("div");
+    row.className = "chain-route";
+    const main = document.createElement("div");
+    main.className = "chain-route-main";
+    const title = document.createElement("strong");
+    title.textContent = `${node.name || node.protocol || node.id} · ${node.protocol || "协议"} :${node.port || "-"}`;
+    title.style.cssText = "min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-primary);";
+    const badge = document.createElement("span");
+    badge.className = `badge ${node.chain_state === "healthy" ? "available" : (node.chain_state === "degraded" ? "not_checked" : "unavailable")}`;
+    badge.textContent = { healthy: "健康", degraded: "降级", disabled: "已禁用" }[node.chain_state] || "未检测";
+    main.append(title, badge);
+    if (node.enabled) {
+      const copy = document.createElement("button");
+      copy.type = "button";
+      copy.className = "connect-btn copy-btn";
+      copy.textContent = "复制链接";
+      copy.onclick = () => copySingboxNodeLink(node.id);
+      main.appendChild(copy);
+    }
+    const path = document.createElement("div");
+    path.className = "chain-route-path mono";
+    const exitId = node.vpn_exit_id || "direct";
+    const exitConfig = exitsById.get(exitId);
+    if (exitId === "direct") {
+      path.textContent = `客户端 -> sing-box -> direct -> 主机网络${node.chain_error ? ` · ${node.chain_error}` : ""}`;
+    } else if (exitConfig) {
+      const source = exitConfig.active_node_id || exitConfig.node_id || "自动选择";
+      path.textContent = `客户端 -> sing-box -> 仅本机 127.0.0.1:${exitConfig.proxy_port} -> ${exitConfig.name || exitId} / ${exitConfig.country || "所有国家"} / ${source}${node.chain_error ? ` · ${node.chain_error}` : ""}`;
+    } else {
+      path.textContent = `客户端 -> sing-box -> 出口 ${exitId} 不存在`;
+    }
+    row.append(main, path);
+    routes.appendChild(row);
+  }
+  if (!nodes.length) routes.innerHTML = '<div class="empty-state">暂无 sing-box 节点，请先创建客户端入口。</div>';
+
+  const issues = [];
+  if (!singbox.installed) issues.push({ text: "sing-box 尚未安装", view: "singbox", action: "安装" });
+  else if (!singbox.running) issues.push({ text: "sing-box 服务已停止", view: "singbox", action: "查看" });
+  for (const node of nodes.filter(item => item.enabled && item.chain_state === "degraded")) {
+    issues.push({ text: `${node.name || node.id}：${node.chain_error || "链路降级"}`, view: "combinations", action: "检查组合" });
+  }
+  for (const exitConfig of exits) {
+    if (["failed", "retry_wait"].includes(exitConfig.phase)) {
+      const retryAt = exitConfig.runtime && exitConfig.runtime.retry_at ? `，重试时间 ${time(exitConfig.runtime.retry_at)}` : "";
+      issues.push({ text: `${exitConfig.name || exitConfig.id}：${(exitConfig.runtime && exitConfig.runtime.error) || exitConfig.phase}${retryAt}`, view: "vpn-exits", action: "处理" });
+    }
+  }
+  attention.innerHTML = "";
+  for (const issue of issues) {
+    const row = document.createElement("div");
+    row.className = "attention-item";
+    const text = document.createElement("span");
+    text.textContent = issue.text;
+    text.style.cssText = "color:var(--text-secondary);line-height:1.45;";
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "connect-btn";
+    button.textContent = issue.action;
+    button.onclick = () => issue.view === "singbox" ? openSingboxModal() : (issue.view === "vpn-exits" ? openVpnExitsModal() : openSingboxCombinationsModal());
+    row.append(text, button);
+    attention.appendChild(row);
+  }
+  if (!issues.length) attention.innerHTML = '<div class="empty-state" style="color:var(--success);">当前没有需要处理的链路故障。</div>';
+}
+
 function renderOverview(singbox, exits) {
   if (singbox) {
     setOverviewValue("overview_singbox", singbox.installed ? (singbox.running ? "运行中" : "已停止") : "未安装", singbox.installed && singbox.running ? "healthy" : "stopped");
@@ -4499,11 +4804,16 @@ function renderOverview(singbox, exits) {
     setOverviewValue("overview_chain", chainText, chainState);
   }
   if (Array.isArray(exits)) {
-    const ready = exits.filter(item => item.running && ["proxy_ready", "healthy"].includes(item.phase)).length;
-    const active = exits.filter(item => item.running).length;
-    setOverviewValue("overview_exits", `${ready} 健康 / ${active} 运行中 / ${exits.length} 个`, ready === exits.length && exits.length ? "healthy" : (active ? "degraded" : "stopped"));
+    const targets = exits.filter(item => item.desired_state === "running" || (item.id === "default" && item.desired_state !== "stopped"));
+    const ready = targets.filter(item => item.running && ["proxy_ready", "healthy"].includes(item.phase)).length;
+    setOverviewValue("overview_exits", `${ready} / ${targets.length || exits.length} 个目标出口就绪`, ready && ready === (targets.length || exits.length) ? "healthy" : (ready ? "degraded" : "stopped"));
   }
-  setOverviewValue("overview_updated", new Date().toLocaleTimeString());
+  if (singbox && Array.isArray(singbox.nodes)) {
+    const lastApplied = Math.max(0, ...singbox.nodes.map(item => Number(item.last_apply_at) || 0));
+    setOverviewValue("overview_updated", lastApplied ? `已应用 ${time(lastApplied)}` : "尚未应用配置", lastApplied ? "healthy" : "degraded");
+    $("overview_updated").title = `数据更新时间：${new Date().toLocaleString()}`;
+  }
+  renderOperationsOverview(singbox, exits);
 }
 
 const translateQuality = q => {
@@ -4852,12 +5162,12 @@ function render(){
         : `<button class="test-btn" style="color: var(--text-secondary); border-color: var(--border-color); padding: 0 8px; height: 30px;" onclick="toggleFavorite('${esc(n.id)}', event)">☆ 收藏</button>`;
 
       return `<tr ${rowClass}>
-        <td><span class="badge ${badgeClass}">${badgeText}</span></td>
-        <td class="mono" style="white-space: nowrap; max-width: 220px; overflow: hidden; text-overflow: ellipsis;" title="${esc(n.ip||n.remote_host)}:${n.remote_port||""}">${esc(n.ip||n.remote_host)}:${n.remote_port||""}</td>
-        <td style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis;" title="${esc(displayLocation)}">${esc(displayLocation)}</td>
-        <td style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis;" title="${esc(n.owner||n.as_name||"-")}">${esc(n.owner||n.as_name||"-")}</td>
-        <td style="white-space: nowrap; max-width: 110px; overflow: hidden; text-overflow: ellipsis;" title="${esc(translateIpType(n.ip_type))}">${esc(translateIpType(n.ip_type))}</td>
-        <td>
+        <td data-label="状态"><span class="badge ${badgeClass}">${badgeText}</span></td>
+        <td data-label="节点地址" class="mono" style="white-space: nowrap; max-width: 220px; overflow: hidden; text-overflow: ellipsis;" title="${esc(n.ip||n.remote_host)}:${n.remote_port||""}">${esc(n.ip||n.remote_host)}:${n.remote_port||""}</td>
+        <td data-label="物理位置" style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis;" title="${esc(displayLocation)}">${esc(displayLocation)}</td>
+        <td data-label="运营主体" style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis;" title="${esc(n.owner||n.as_name||"-")}">${esc(n.owner||n.as_name||"-")}</td>
+        <td data-label="IP 类型" style="white-space: nowrap; max-width: 110px; overflow: hidden; text-overflow: ellipsis;" title="${esc(translateIpType(n.ip_type))}">${esc(translateIpType(n.ip_type))}</td>
+        <td data-label="操作">
           <div class="table-actions">
             ${favBtn}
             ${connectBtn}
@@ -5591,18 +5901,23 @@ let vpnExits = [];
 let vpnExitNodes = [];
 let selectedVpnExitId = "default";
 let combinationDirty = false;
+let combinationOriginal = new Map();
 let singboxRuntime = {};
 let singboxDirty = false;
 let vpnExitsDirty = false;
+let singboxLinkCache = new Map();
+let singboxQrNodeId = "";
 
 function markSingboxDirty() {
   singboxDirty = true;
   const marker = $("singbox_dirty_status");
   if (marker) marker.style.display = "block";
+  setOverviewValue("overview_updated", "有未保存变更", "degraded");
 }
 
 function markVpnExitsDirty() {
   vpnExitsDirty = true;
+  setOverviewValue("overview_updated", "有未保存变更", "degraded");
 }
 
 if ($("singbox_form")) $("singbox_form").addEventListener("input", markSingboxDirty);
@@ -5637,26 +5952,41 @@ function populateVpnExitFilters(exitConfig) {
 function filteredVpnExitNodes() {
   const country = $("ve_country").value;
   const ipType = $("ve_ip_type").value;
-  return vpnExitNodes.filter(node => {
+  const maxPing = Number($("ve_max_ping").value || 0);
+  const minSpeedMbps = Number($("ve_min_speed").value || 0);
+  const availableOnly = $("ve_available_only").checked;
+  const sortMode = $("ve_sort").value;
+  const candidates = vpnExitNodes.filter(node => {
     if (country && translateCountry(node.country) !== country) return false;
     if (ipType === "residential" && !["residential", "mobile"].includes(node.ip_type)) return false;
     if (ipType === "hosting" && node.ip_type !== "hosting") return false;
+    if (availableOnly && node.probe_status !== "available") return false;
+    const ping = Number(node.ping || node.latency_ms || 0);
+    if (maxPing > 0 && (!ping || ping > maxPing)) return false;
+    const speedMbps = Number(node.speed || 0) * 8 / 1000000;
+    if (minSpeedMbps > 0 && speedMbps < minSpeedMbps) return false;
     return true;
   });
+  const availableRank = node => node.probe_status === "available" ? 0 : (node.probe_status === "unavailable" ? 2 : 1);
+  candidates.sort((left, right) => {
+    if (sortMode === "ping") return (Number(left.ping || left.latency_ms) || 999999) - (Number(right.ping || right.latency_ms) || 999999);
+    if (sortMode === "speed") return (Number(right.speed) || 0) - (Number(left.speed) || 0);
+    if (sortMode === "uptime") return (Number(right.sessions) || 0) - (Number(left.sessions) || 0);
+    return availableRank(left) - availableRank(right) || (Number(right.speed) || 0) - (Number(left.speed) || 0) || (Number(left.ping || left.latency_ms) || 999999) - (Number(right.ping || right.latency_ms) || 999999);
+  });
+  return candidates;
 }
 
 function populateVpnExitNodeSelect(nodeId) {
   const select = $("ve_node");
   select.innerHTML = '<option value="">选择 VPNGate 节点</option>';
-  const candidates = filteredVpnExitNodes().sort((left, right) => {
-    const leftAvailable = left.probe_status === "available" ? 0 : 1;
-    const rightAvailable = right.probe_status === "available" ? 0 : 1;
-    return leftAvailable - rightAvailable || (Number(right.speed) || 0) - (Number(left.speed) || 0) || (Number(left.ping) || 999999) - (Number(right.ping) || 999999);
-  });
+  const candidates = filteredVpnExitNodes();
   for (const node of candidates) {
     const option = document.createElement("option");
     option.value = node.id;
-    const details = [node.name, node.ip, node.ip_type || "IP类型未知", node.probe_status === "available" ? "可用" : "待检测"].filter(Boolean);
+    const ping = Number(node.ping || node.latency_ms || 0);
+    const speedMbps = Number(node.speed || 0) * 8 / 1000000;
+    const details = [node.name || node.country, node.ip, node.ip_type || "IP类型未知", ping ? `${ping} ms` : "延迟未知", speedMbps ? `${speedMbps.toFixed(1)} Mbps` : "速度未知", node.probe_status === "available" ? "可用" : (node.probe_status === "unavailable" ? "不可用" : "待检测")].filter(Boolean);
     option.textContent = details.join(" · ");
     select.appendChild(option);
   }
@@ -5666,6 +5996,30 @@ function populateVpnExitNodeSelect(nodeId) {
 function filterVpnExitNodes() {
   const selectedNodeId = $("ve_node").value;
   populateVpnExitNodeSelect(selectedNodeId);
+  const count = filteredVpnExitNodes().length;
+  $("ve_node").title = `当前筛选出 ${count} 个节点`;
+  syncVpnExitFilterLocation();
+}
+
+function syncVpnExitFilterLocation() {
+  if (currentPrimaryView() !== "vpn-exits") return;
+  const query = new URLSearchParams();
+  if ($("ve_max_ping").value) query.set("max_ping", $("ve_max_ping").value);
+  if ($("ve_min_speed").value) query.set("min_speed", $("ve_min_speed").value);
+  if ($("ve_available_only").checked) query.set("available", "1");
+  if ($("ve_sort").value !== "balanced") query.set("sort", $("ve_sort").value);
+  const suffix = query.toString();
+  history.replaceState({ view: "vpn-exits" }, "", `#/vpn-exits${suffix ? `?${suffix}` : ""}`);
+}
+
+function restoreVpnExitFilterLocation() {
+  const queryText = window.location.hash.includes("?") ? window.location.hash.split("?").slice(1).join("?") : "";
+  const query = new URLSearchParams(queryText);
+  $("ve_max_ping").value = query.get("max_ping") || "";
+  $("ve_min_speed").value = query.get("min_speed") || "";
+  $("ve_available_only").checked = query.get("available") === "1";
+  const sort = query.get("sort") || "balanced";
+  $("ve_sort").value = ["balanced", "ping", "speed", "uptime"].includes(sort) ? sort : "balanced";
 }
 
 function selectedVpnExit() {
@@ -5813,17 +6167,18 @@ async function vpnExitAction(id, action) {
   }
 }
 
-async function openVpnExitsModal() {
+async function openVpnExitsModal(updateHistory = true) {
+  if (!setPrimaryView("vpn-exits", updateHistory)) return;
   setVpnExitMessage("", "");
   vpnExitsDirty = false;
-  $("vpn_exits_modal").style.display = "flex";
-  $("admin_dropdown").style.display = "none";
   try {
     const data = await apiFetch("./api/vpn-exits");
     vpnExits = data.exits || [];
     vpnExitNodes = data.nodes || [];
     selectedVpnExitId = vpnExits.some(item => item.id === selectedVpnExitId) ? selectedVpnExitId : "default";
     fillVpnExitForm(selectedVpnExit());
+    restoreVpnExitFilterLocation();
+    filterVpnExitNodes();
     renderVpnExitTable();
   } catch (err) {
     setVpnExitMessage("error", err.message || "读取 VPN 出口失败");
@@ -5832,7 +6187,8 @@ async function openVpnExitsModal() {
 
 function closeVpnExitsModal() {
   if (vpnExitsDirty && !confirm("VPN 出口有未保存变更，确定关闭吗？")) return;
-  $("vpn_exits_modal").style.display = "none";
+  vpnExitsDirty = false;
+  openOverviewPage();
 }
 
 function setCombinationMessage(type, message) {
@@ -5854,9 +6210,22 @@ function combinationExitLabel(exitConfig) {
 function renderSingboxCombinations() {
   const table = $("singbox_combinations_table");
   table.innerHTML = "";
+  const batchSelect = $("combination_batch_exit");
+  batchSelect.innerHTML = '<option value="direct">direct（主机网络）</option>';
+  for (const exitConfig of vpnExits) {
+    const option = document.createElement("option");
+    option.value = exitConfig.id;
+    option.textContent = combinationExitLabel(exitConfig);
+    batchSelect.appendChild(option);
+  }
   for (const node of singboxNodes) {
     const row = document.createElement("div");
-    row.style.cssText = "display:grid;grid-template-columns:minmax(0,1fr) minmax(230px,1fr);gap:12px;align-items:center;padding:11px 12px;border-bottom:1px solid var(--border-color);";
+    row.style.cssText = "display:grid;grid-template-columns:auto minmax(0,1fr) minmax(230px,1fr);gap:12px;align-items:center;padding:11px 12px;border-bottom:1px solid var(--border-color);";
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.className = "combination-node-check";
+    checkbox.dataset.nodeId = node.id;
+    checkbox.setAttribute("aria-label", `选择 ${node.name || node.protocol || node.id}`);
     const title = document.createElement("div");
     title.style.cssText = "min-width:0;";
     const name = document.createElement("div");
@@ -5890,13 +6259,80 @@ function renderSingboxCombinations() {
     select.onchange = () => {
       combinationDirty = true;
       $("singbox_combinations_dirty").style.display = "block";
+      $("combination_preview").style.display = "none";
+      setOverviewValue("overview_updated", "有未应用变更", "degraded");
     };
-    row.append(title, select);
+    row.append(checkbox, title, select);
     table.appendChild(row);
   }
   if (!singboxNodes.length) {
     table.textContent = "暂无 sing-box 节点，请先在 sing-box 节点页面新增。";
   }
+}
+
+function selectAllCombinationNodes(selected) {
+  document.querySelectorAll(".combination-node-check").forEach(input => { input.checked = selected; });
+}
+
+function applyCombinationBatch() {
+  const selectedIds = new Set(Array.from(document.querySelectorAll(".combination-node-check:checked")).map(input => input.dataset.nodeId));
+  if (!selectedIds.size) {
+    showToast("请先选择需要批量绑定的节点。", "warning");
+    return;
+  }
+  const exitId = $("combination_batch_exit").value || "direct";
+  document.querySelectorAll("#singbox_combinations_table select[data-node-id]").forEach(select => {
+    if (selectedIds.has(select.dataset.nodeId)) select.value = exitId;
+  });
+  combinationDirty = true;
+  $("singbox_combinations_dirty").style.display = "block";
+  $("combination_preview").style.display = "none";
+  setOverviewValue("overview_updated", "有未应用变更", "degraded");
+  showToast(`已更新 ${selectedIds.size} 个节点，尚未应用`);
+}
+
+function currentCombinationChanges() {
+  return Array.from($("singbox_combinations_table").querySelectorAll("select[data-node-id]")).map(select => {
+    const node = singboxNodes.find(item => item.id === select.dataset.nodeId) || {};
+    const previous = combinationOriginal.get(select.dataset.nodeId) || "direct";
+    const next = select.value || "direct";
+    return { node_id: select.dataset.nodeId, name: node.name || node.protocol || select.dataset.nodeId, previous, next };
+  }).filter(item => item.previous !== item.next);
+}
+
+function combinationTargetLabel(exitId) {
+  if (exitId === "direct") return "direct（主机网络）";
+  const exitConfig = vpnExits.find(item => item.id === exitId);
+  return exitConfig ? combinationExitLabel(exitConfig) : `${exitId}（出口不存在）`;
+}
+
+function previewSingboxCombinations() {
+  const preview = $("combination_preview");
+  const changes = currentCombinationChanges();
+  preview.style.display = "block";
+  preview.replaceChildren();
+  const heading = document.createElement("h2");
+  heading.textContent = `变更预览（${changes.length}）`;
+  preview.appendChild(heading);
+  if (!changes.length) {
+    const empty = document.createElement("div");
+    empty.className = "empty-state";
+    empty.textContent = "当前绑定关系没有变化。";
+    preview.appendChild(empty);
+    return changes;
+  }
+  for (const change of changes) {
+    const item = document.createElement("div");
+    item.className = "chain-route";
+    const name = document.createElement("strong");
+    name.textContent = change.name;
+    const route = document.createElement("div");
+    route.className = "chain-route-path";
+    route.textContent = `${combinationTargetLabel(change.previous)} -> ${combinationTargetLabel(change.next)}`;
+    item.append(name, route);
+    preview.appendChild(item);
+  }
+  return changes;
 }
 
 async function refreshSingboxCombinations() {
@@ -5908,28 +6344,36 @@ async function refreshSingboxCombinations() {
     singboxNodes = data.nodes || [];
     vpnExits = data.exits || [];
     singboxRuntime = statusData.data || {};
+    combinationOriginal = new Map(singboxNodes.map(node => [node.id, node.vpn_exit_id || "direct"]));
     combinationDirty = false;
     $("singbox_combinations_dirty").style.display = "none";
+    $("combination_preview").style.display = "none";
     renderSingboxCombinations();
   } catch (err) {
     setCombinationMessage("error", err.message || "读取节点组合失败");
   }
 }
 
-async function openSingboxCombinationsModal() {
+async function openSingboxCombinationsModal(updateHistory = true) {
+  if (!setPrimaryView("combinations", updateHistory)) return;
   setCombinationMessage("", "");
-  $("singbox_combinations_modal").style.display = "flex";
-  $("admin_dropdown").style.display = "none";
   await refreshSingboxCombinations();
 }
 
 function closeSingboxCombinationsModal() {
   if (combinationDirty && !confirm("节点组合有未应用变更，确定关闭吗？")) return;
-  $("singbox_combinations_modal").style.display = "none";
+  combinationDirty = false;
+  openOverviewPage();
 }
 
 async function saveSingboxCombinations() {
   const button = $("singbox_combinations_save");
+  const changes = previewSingboxCombinations();
+  if (!changes.length) {
+    showToast("节点组合没有需要应用的变更。", "warning");
+    return;
+  }
+  if (!confirm(`将应用 ${changes.length} 项节点组合变更。应用期间相关入口可能短暂重载，是否继续？`)) return;
   const mappings = Array.from($("singbox_combinations_table").querySelectorAll("select[data-node-id]")).map(select => ({
     node_id: select.dataset.nodeId,
     vpn_exit_id: select.value || "direct",
@@ -5944,13 +6388,15 @@ async function saveSingboxCombinations() {
     });
     singboxNodes = data.nodes || singboxNodes;
     combinationDirty = false;
+    combinationOriginal = new Map(singboxNodes.map(node => [node.id, node.vpn_exit_id || "direct"]));
     $("singbox_combinations_dirty").style.display = "none";
     renderSingboxCombinations();
     setCombinationMessage("success", data.message || "节点组合已保存并应用");
     showToast("节点组合已应用");
     await load();
   } catch (err) {
-    setCombinationMessage("error", err.message || "保存节点组合失败");
+    setCombinationMessage("error", `${err.message || "保存节点组合失败"}；应用未成功，系统会保留或恢复上一次有效运行配置。`);
+    showToast("节点组合应用失败，已保留原运行配置", "error");
   } finally {
     button.disabled = false;
   }
@@ -5991,7 +6437,9 @@ function renderSingboxNodeSelect() {
 function renderSingboxNodeTable() {
   const table = $("sb_node_table");
   table.innerHTML = "";
-  for (const node of singboxNodes) {
+  const query = String($("sb_node_search") && $("sb_node_search").value || "").trim().toLocaleLowerCase();
+  const visibleNodes = singboxNodes.filter(node => !query || [node.name, node.protocol, node.port].some(value => String(value || "").toLocaleLowerCase().includes(query)));
+  for (const node of visibleNodes) {
     const row = document.createElement("div");
     row.style.cssText = "display:grid;grid-template-columns:minmax(0,1fr) 100px 78px 56px auto;gap:8px;align-items:center;padding:9px 10px;border-bottom:1px solid var(--border-color);font-size:12px;";
     const name = document.createElement("span");
@@ -6022,6 +6470,13 @@ function renderSingboxNodeTable() {
     }
     row.append(name, protocol, nodeStatus, port, actions);
     table.appendChild(row);
+  }
+  if (!visibleNodes.length) {
+    const empty = document.createElement("div");
+    empty.className = "empty-state";
+    empty.style.padding = "14px 12px";
+    empty.textContent = query ? "没有匹配的 sing-box 节点。" : "暂无 sing-box 节点。";
+    table.appendChild(empty);
   }
 }
 
@@ -6107,15 +6562,91 @@ function deleteSingboxNode() {
 }
 
 async function copySingboxLink(uri) {
+  if (!uri) {
+    showToast("节点链接尚未生成。", "warning");
+    return;
+  }
   try {
     await navigator.clipboard.writeText(uri);
     setSingboxMessage("success", "节点链接已复制。");
+    showToast("节点链接已复制");
   } catch (_) {
     $("sb_client_uri").value = uri;
     $("sb_client_uri").select();
     document.execCommand("copy");
     setSingboxMessage("success", "节点链接已复制。");
+    showToast("节点链接已复制");
   }
+}
+
+function toggleSingboxLinkVisibility(inputId, button) {
+  const input = $(inputId);
+  if (!input) return;
+  const reveal = input.type === "password";
+  input.type = reveal ? "text" : "password";
+  if (button) button.textContent = reveal ? "隐藏" : "显示";
+}
+
+function copyCurrentSingboxLink() {
+  copySingboxLink($("sb_client_uri").value);
+}
+
+function copySingboxQrLink() {
+  copySingboxLink(singboxLinkCache.get(singboxQrNodeId) || "");
+}
+
+function closeSingboxQr() {
+  $("singbox_qr_modal").style.display = "none";
+  singboxQrNodeId = "";
+  $("singbox_qr_image").replaceChildren("二维码将在本机生成");
+}
+
+function showSingboxQr(nodeId = selectedSingboxNodeId) {
+  const node = singboxNodes.find(item => item.id === nodeId);
+  if (!node || !singboxLinkCache.get(nodeId)) {
+    showToast("请先保存节点并生成客户端链接。", "warning");
+    return;
+  }
+  singboxQrNodeId = nodeId;
+  $("singbox_qr_name").textContent = `${node.name || node.protocol} · ${node.protocol} · ${node.public_host || "服务器地址未设置"}:${node.port}`;
+  const image = document.createElement("img");
+  image.alt = `${node.name || node.protocol} 节点二维码`;
+  image.width = 240;
+  image.height = 240;
+  image.style.cssText = "display:block;max-width:100%;height:auto;image-rendering:pixelated;";
+  image.onerror = () => {
+    $("singbox_qr_image").replaceChildren("二维码生成失败，请确认服务器已安装 qrencode，或直接复制链接。");
+  };
+  image.src = `./api/singbox/qr?node_id=${encodeURIComponent(nodeId)}&t=${Date.now()}`;
+  $("singbox_qr_image").replaceChildren(image);
+  $("singbox_qr_modal").style.display = "flex";
+}
+
+async function exportSingboxLinks(format = "text") {
+  const links = [];
+  for (const node of singboxNodes) {
+    try {
+      let uri = singboxLinkCache.get(node.id);
+      if (!uri) {
+        const data = await apiFetch(`./api/singbox/client_info?node_id=${encodeURIComponent(node.id)}`);
+        uri = data.data && data.data.uri;
+      }
+      if (uri) links.push({ name: node.name || node.protocol, protocol: node.protocol, server: node.public_host, port: node.port, uri });
+    } catch (_) {}
+  }
+  if (!links.length) {
+    showToast("没有可导出的已保存节点链接。", "warning");
+    return;
+  }
+  const isJson = format === "json";
+  const content = isJson ? `${JSON.stringify(links, null, 2)}\n` : `${links.map(item => `# ${item.name}\n${item.uri}`).join("\n\n")}\n`;
+  const blob = new Blob([content], { type: isJson ? "application/json;charset=utf-8" : "text/plain;charset=utf-8" });
+  const anchor = document.createElement("a");
+  anchor.href = URL.createObjectURL(blob);
+  anchor.download = `aimilivpn-nodes-${new Date().toISOString().slice(0, 10)}.${isJson ? "json" : "txt"}`;
+  anchor.click();
+  setTimeout(() => URL.revokeObjectURL(anchor.href), 1000);
+  showToast(`已导出 ${links.length} 个节点链接`);
 }
 
 async function copySingboxNodeLink(nodeId) {
@@ -6131,10 +6662,12 @@ async function copySingboxNodeLink(nodeId) {
 async function renderSingboxLinks() {
   const list = $("sb_node_links");
   list.innerHTML = "";
+  singboxLinkCache = new Map();
   for (const node of singboxNodes) {
     try {
       const data = await apiFetch(`./api/singbox/client_info?node_id=${encodeURIComponent(node.id)}`);
       if (!data.data || !data.data.uri) continue;
+      singboxLinkCache.set(node.id, data.data.uri);
       const row = document.createElement("div");
       row.style.cssText = "display:grid;grid-template-columns:140px minmax(0,1fr) auto;gap:8px;align-items:center;";
       const name = document.createElement("span");
@@ -6144,14 +6677,30 @@ async function renderSingboxLinks() {
       name.style.cssText = "overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-primary);font-size:12px;";
       const input = document.createElement("input");
       input.className = "input-field mono";
+      input.type = "password";
+      input.id = `sb_link_${node.id}`;
       input.value = data.data.uri;
       input.readOnly = true;
+      const revealButton = document.createElement("button");
+      revealButton.type = "button";
+      revealButton.className = "connect-btn";
+      revealButton.textContent = "显示";
+      revealButton.onclick = () => toggleSingboxLinkVisibility(input.id, revealButton);
       const button = document.createElement("button");
       button.type = "button";
       button.className = "connect-btn copy-btn";
       button.textContent = "复制";
       button.onclick = () => copySingboxLink(data.data.uri);
-      row.append(name, input, button);
+      const qrButton = document.createElement("button");
+      qrButton.type = "button";
+      qrButton.className = "connect-btn";
+      qrButton.textContent = "二维码";
+      qrButton.onclick = () => showSingboxQr(node.id);
+      const actions = document.createElement("span");
+      actions.style.cssText = "display:flex;gap:5px;flex-wrap:wrap;";
+      actions.append(revealButton, button, qrButton);
+      row.style.gridTemplateColumns = "140px minmax(0,1fr) auto";
+      row.append(name, input, actions);
       list.appendChild(row);
     } catch (_) {}
   }
@@ -6186,12 +6735,11 @@ function renderSingboxRuntime(runtime) {
   statusEl.textContent = `${service}；${chain}`;
 }
 
-async function openSingboxModal() {
+async function openSingboxModal(updateHistory = true) {
+  if (!setPrimaryView("singbox", updateHistory)) return;
   setSingboxMessage("", "");
   singboxDirty = false;
   $("singbox_dirty_status").style.display = "none";
-  $("singbox_modal").style.display = "flex";
-  $("admin_dropdown").style.display = "none";
   try {
     const [configResult, statusResult] = await Promise.allSettled([
       apiFetch("./api/singbox/config"),
@@ -6215,7 +6763,8 @@ async function openSingboxModal() {
 
 function closeSingboxModal() {
   if (singboxDirty && !confirm("sing-box 节点有未保存变更，确定关闭吗？")) return;
-  $("singbox_modal").style.display = "none";
+  singboxDirty = false;
+  openOverviewPage();
 }
 
 async function singboxAction(action) {
@@ -6254,8 +6803,8 @@ async function regenerateSingbox(kind) {
   }
 }
 
-async function saveSingboxConfig(event) {
-  event.preventDefault();
+async function saveSingboxConfig(event, apply = true) {
+  if (event) event.preventDefault();
   setSingboxMessage("", "");
   const submit = $("singbox_submit_btn");
   const port = parseInt($("sb_port").value, 10);
@@ -6276,21 +6825,23 @@ async function saveSingboxConfig(event) {
     return;
   }
   submit.disabled = true;
-  submit.textContent = "正在校验并应用...";
+  submit.textContent = apply ? "正在校验并应用..." : "正在保存...";
   try {
-    const data = await apiFetch("./api/singbox/config", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ nodes: singboxNodes, apply: true }) });
+    const data = await apiFetch("./api/singbox/config", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ nodes: singboxNodes, apply }) });
     singboxNodes = data.nodes || singboxNodes;
     singboxDirty = false;
     $("singbox_dirty_status").style.display = "none";
     renderSingboxNodeSelect();
     fillSingboxForm(selectedSingboxNode());
     await renderSingboxLinks();
-    setSingboxMessage("success", data.message || "配置已应用");
-    showToast("sing-box 配置已应用");
+    setSingboxMessage("success", data.message || (apply ? "配置已应用" : "配置已保存，尚未应用"));
+    showToast(apply ? "sing-box 配置已应用" : "sing-box 配置已保存");
     await loadSingboxClientInfo();
     await load();
   } catch (err) {
-    setSingboxMessage("error", err.message || "保存 sing-box 配置失败");
+    const suffix = apply ? "；应用未成功，系统会保留或恢复上一次有效运行配置。" : "；未替换当前运行配置。";
+    setSingboxMessage("error", `${err.message || "保存 sing-box 配置失败"}${suffix}`);
+    showToast(apply ? "配置应用失败，已保留原运行配置" : "配置保存失败", "error");
   } finally {
     submit.disabled = false;
     submit.textContent = "保存并应用";
@@ -6335,14 +6886,74 @@ async function logoutAdmin() {
   }
 }
 
-// 页面加载时自动初始化数据
-load();
+function primaryViewFromLocation() {
+  const view = window.location.hash.replace(/^#\/?/, "").split("?", 1)[0];
+  return PRIMARY_VIEWS.has(view) ? view : "overview";
+}
+
+async function openPrimaryViewFromLocation(updateHistory = false) {
+  const view = primaryViewFromLocation();
+  if (view === "singbox") return openSingboxModal(updateHistory);
+  if (view === "vpn-exits") return openVpnExitsModal(updateHistory);
+  if (view === "combinations") return openSingboxCombinationsModal(updateHistory);
+  return openOverviewPage(updateHistory);
+}
+
+window.addEventListener("popstate", async () => {
+  const requested = primaryViewFromLocation();
+  const current = currentPrimaryView();
+  await openPrimaryViewFromLocation(false);
+  if (currentPrimaryView() !== requested) {
+    history.pushState({ view: current }, "", `#/${current}`);
+  }
+});
+
+// 页面加载时自动初始化数据和 URL 对应的一级页面
+(async () => {
+  await load();
+  const requested = primaryViewFromLocation();
+  history.replaceState({ view: requested }, "", `#/${requested}`);
+  await openPrimaryViewFromLocation(false);
+})();
+
+async function refreshVisibleWorkspaceStatus() {
+  const view = currentPrimaryView();
+  if (view === "singbox" && !singboxDirty) {
+    const data = await apiFetch("./api/singbox/status");
+    singboxRuntime = data.data || {};
+    renderSingboxRuntime(singboxRuntime);
+    renderSingboxNodeTable();
+    return;
+  }
+  if (view === "vpn-exits" && !vpnExitsDirty) {
+    const data = await apiFetch("./api/vpn-exits");
+    vpnExits = data.exits || vpnExits;
+    vpnExitNodes = data.nodes || vpnExitNodes;
+    fillVpnExitForm(selectedVpnExit());
+    restoreVpnExitFilterLocation();
+    filterVpnExitNodes();
+    renderVpnExitTable();
+    return;
+  }
+  if (view === "combinations" && !combinationDirty) {
+    const [combinationData, statusData] = await Promise.all([
+      apiFetch("./api/singbox/combinations"),
+      apiFetch("./api/singbox/status"),
+    ]);
+    singboxNodes = combinationData.nodes || singboxNodes;
+    vpnExits = combinationData.exits || vpnExits;
+    singboxRuntime = statusData.data || {};
+    combinationOriginal = new Map(singboxNodes.map(node => [node.id, node.vpn_exit_id || "direct"]));
+    renderSingboxCombinations();
+  }
+}
 
 // 每 10 秒在前台空闲时自动更新节点与状态，无需手动刷新页面
 setInterval(async () => {
   if (typeof state !== "undefined" && !state.is_connecting && (!testingNodeIds || !testingNodeIds.size) && document.visibilityState === "visible") {
     try {
       await load();
+      await refreshVisibleWorkspaceStatus();
     } catch(e) {}
   }
 }, 10000);
@@ -6911,12 +7522,24 @@ class Handler(BaseHTTPRequestHandler):
                     "probe_status": node.get("probe_status") or "",
                     "speed": parse_int(node.get("speed")),
                     "ping": parse_int(node.get("ping")),
+                    "sessions": parse_int(node.get("sessions")),
                 })
             self.send_json({
                 "ok": True,
                 "exits": [vpn_exit_view_status(item, ui_cfg) for item in current_vpn_exits(ui_cfg)],
                 "nodes": selectable_nodes,
             })
+        elif effective_path == "/api/singbox/qr":
+            try:
+                requested_id = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query).get("node_id", [""])[0]
+                node = next((item for item in current_singbox_nodes() if item.get("id") == requested_id), None)
+                if node is None:
+                    raise singbox_manager.SingBoxError("未找到协议节点")
+                self.send_bytes(singbox_qr_png(node), "image/png")
+            except FileNotFoundError:
+                self.send_json({"ok": False, "error": "服务器未安装 qrencode"}, HTTPStatus.SERVICE_UNAVAILABLE)
+            except Exception as exc:
+                self.send_json({"ok": False, "error": str(exc)}, HTTPStatus.BAD_REQUEST)
         elif effective_path == "/api/singbox/client_info":
             try:
                 requested_id = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query).get("node_id", [""])[0]
