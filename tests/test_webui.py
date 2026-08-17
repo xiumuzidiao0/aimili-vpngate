@@ -44,7 +44,10 @@ class WebUiContractTests(unittest.TestCase):
     def test_installer_includes_local_qr_encoder(self):
         installer = Path(__file__).resolve().parents[1].joinpath("install.sh").read_text(encoding="utf-8")
 
-        self.assertGreaterEqual(installer.count("qrencode"), 3)
+        self.assertIn("apt-get install -y qrencode ||", installer)
+        self.assertIn("apk add libqrencode-tools ||", installer)
+        self.assertIn("$PKG_MGR install -y qrencode ||", installer)
+        self.assertGreaterEqual(installer.count("其余功能不受影响"), 3)
 
     def test_readme_installer_does_not_execute_http_error_pages(self):
         readme = Path(__file__).resolve().parents[1].joinpath("README.md").read_text(encoding="utf-8")

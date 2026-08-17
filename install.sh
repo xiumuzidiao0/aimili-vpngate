@@ -74,13 +74,15 @@ if [ "$PKG_MGR" = "apt-get" ]; then
     echo -e "  -> 正在运行 apt-get update 更新软件源清单..."
     apt-get update -q || true
     echo -e "  -> 正在运行 apt-get install 安装基础依赖包..."
-    apt-get install -y openvpn curl git ca-certificates iptables iproute2 psmisc python3 qrencode
+    apt-get install -y openvpn curl git ca-certificates iptables iproute2 psmisc python3
+    apt-get install -y qrencode || echo -e "${YELLOW}  -> 警告: qrencode 安装失败，WebUI 二维码暂不可用，其余功能不受影响。${PLAIN}"
 elif [ "$PKG_MGR" = "apk" ]; then
     echo -e "  -> 正在运行 apk update 更新软件源清单..."
     apk update || true
     echo -e "  -> 正在运行 apk add 安装基础依赖包..."
     # bash is required for this script itself and some internal logic
-    apk add openvpn curl git ca-certificates iptables iproute2 psmisc python3 bash qrencode
+    apk add openvpn curl git ca-certificates iptables iproute2 psmisc python3 bash
+    apk add libqrencode-tools || echo -e "${YELLOW}  -> 警告: libqrencode-tools 安装失败，WebUI 二维码暂不可用，其余功能不受影响。${PLAIN}"
 elif [ "$PKG_MGR" = "dnf" ] || [ "$PKG_MGR" = "yum" ]; then
     echo -e "  -> 正在运行 $PKG_MGR 安装基础依赖包..."
     if [ "$OS_TYPE" != "fedora" ] && [ "$OS_TYPE" != "amzn" ]; then
@@ -88,8 +90,9 @@ elif [ "$PKG_MGR" = "dnf" ] || [ "$PKG_MGR" = "yum" ]; then
         $PKG_MGR install -y epel-release || true
     fi
     # Try installing packages. Note: iproute or iproute2
-    $PKG_MGR install -y openvpn curl git ca-certificates iptables iproute psmisc python3 qrencode || \
-    $PKG_MGR install -y openvpn curl git ca-certificates iptables iproute2 psmisc python3 qrencode
+    $PKG_MGR install -y openvpn curl git ca-certificates iptables iproute psmisc python3 || \
+    $PKG_MGR install -y openvpn curl git ca-certificates iptables iproute2 psmisc python3
+    $PKG_MGR install -y qrencode || echo -e "${YELLOW}  -> 警告: qrencode 安装失败，WebUI 二维码暂不可用，其余功能不受影响。${PLAIN}"
 fi
 
 # 4. Clone or pull the repository
