@@ -4197,7 +4197,7 @@ INDEX_HTML = r"""<!doctype html>
   <div id="singbox_modal" class="modal">
     <div class="modal-content" style="max-width: 640px; width: 94%; max-height: 88vh; overflow-y: auto;">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:18px;">
-        <div><h3 style="margin:0;font-size:18px;color:var(--text-primary);">sing-box 节点</h3><div id="singbox_runtime_status" style="font-size:12px;color:var(--text-secondary);margin-top:5px;">正在读取服务状态...</div></div>
+        <div><h3 style="margin:0;font-size:18px;color:var(--text-primary);">sing-box 节点</h3><div id="singbox_runtime_status" style="font-size:12px;color:var(--text-secondary);margin-top:5px;">正在读取服务状态...</div><div id="singbox_dirty_status" style="display:none;color:var(--warning);font-size:12px;margin-top:5px;">有未保存变更</div></div>
         <button type="button" onclick="closeSingboxModal()" title="关闭" style="background:transparent;border:none;padding:4px;cursor:pointer;color:var(--text-secondary);width:28px;height:28px;">&#10005;</button>
       </div>
       <div id="singbox_error" style="color:var(--danger);font-size:13px;margin-bottom:12px;padding:8px 12px;background:rgba(244,63,94,0.1);border:1px solid rgba(244,63,94,0.2);border-radius:6px;display:none;"></div>
@@ -5592,6 +5592,21 @@ let vpnExitNodes = [];
 let selectedVpnExitId = "default";
 let combinationDirty = false;
 let singboxRuntime = {};
+let singboxDirty = false;
+let vpnExitsDirty = false;
+
+function markSingboxDirty() {
+  singboxDirty = true;
+  const marker = $("singbox_dirty_status");
+  if (marker) marker.style.display = "block";
+}
+
+function markVpnExitsDirty() {
+  vpnExitsDirty = true;
+}
+
+if ($("singbox_form")) $("singbox_form").addEventListener("input", markSingboxDirty);
+if ($("vpn_exit_form")) $("vpn_exit_form").addEventListener("input", markVpnExitsDirty);
 
 function setVpnExitMessage(type, message) {
   const errorEl = $("vpn_exits_error");
@@ -5735,6 +5750,7 @@ function addVpnExit() {
   const id = `exit${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`.slice(0, 32);
   const exitConfig = { id, name: "新 VPN 出口", country: "", ip_type: "all", node_id: "", proxy_port: port, enabled: true, running: false };
   vpnExits.push(exitConfig);
+  markVpnExitsDirty();
   fillVpnExitForm(exitConfig);
   renderVpnExitTable();
 }
@@ -5750,6 +5766,7 @@ function deleteVpnExit(exitId) {
   }
   if (!confirm(`确定删除出口“${exitConfig.name || exitId}”吗？`)) return;
   vpnExits = vpnExits.filter(item => item.id !== exitId);
+  markVpnExitsDirty();
   selectedVpnExitId = "default";
   fillVpnExitForm(selectedVpnExit());
   renderVpnExitTable();
@@ -5766,6 +5783,7 @@ async function saveVpnExits(event) {
   try {
     const data = await apiFetch("./api/vpn-exits/config", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ exits: vpnExits }) });
     vpnExits = data.exits || vpnExits;
+    vpnExitsDirty = false;
     fillVpnExitForm(selectedVpnExit());
     renderVpnExitTable();
     setVpnExitMessage("success", data.message || "VPN 出口配置已保存");
@@ -5797,6 +5815,7 @@ async function vpnExitAction(id, action) {
 
 async function openVpnExitsModal() {
   setVpnExitMessage("", "");
+  vpnExitsDirty = false;
   $("vpn_exits_modal").style.display = "flex";
   $("admin_dropdown").style.display = "none";
   try {
@@ -5812,6 +5831,7 @@ async function openVpnExitsModal() {
 }
 
 function closeVpnExitsModal() {
+  if (vpnExitsDirty && !confirm("VPN 出口有未保存变更，确定关闭吗？")) return;
   $("vpn_exits_modal").style.display = "none";
 }
 
@@ -6063,6 +6083,7 @@ function addSingboxNode() {
     password: "", method: "chacha20-ietf-poly1305", username: "aimilivpn", vpn_exit_id: "direct"
   };
   singboxNodes.push(node);
+  markSingboxDirty();
   selectedSingboxNodeId = id;
   renderSingboxNodeSelect();
   fillSingboxForm(node);
@@ -6078,6 +6099,7 @@ function deleteSingboxNode() {
   const deleting = selectedSingboxNode();
   if (!deleting || !confirm(`确定删除协议节点“${deleting.name || deleting.id}”吗？保存并应用后才会生效。`)) return;
   singboxNodes = singboxNodes.filter(node => node.id !== selectedSingboxNodeId);
+  markSingboxDirty();
   selectedSingboxNodeId = singboxNodes[0].id;
   renderSingboxNodeSelect();
   fillSingboxForm(singboxNodes[0]);
@@ -6166,6 +6188,8 @@ function renderSingboxRuntime(runtime) {
 
 async function openSingboxModal() {
   setSingboxMessage("", "");
+  singboxDirty = false;
+  $("singbox_dirty_status").style.display = "none";
   $("singbox_modal").style.display = "flex";
   $("admin_dropdown").style.display = "none";
   try {
@@ -6190,6 +6214,7 @@ async function openSingboxModal() {
 }
 
 function closeSingboxModal() {
+  if (singboxDirty && !confirm("sing-box 节点有未保存变更，确定关闭吗？")) return;
   $("singbox_modal").style.display = "none";
 }
 
@@ -6255,6 +6280,8 @@ async function saveSingboxConfig(event) {
   try {
     const data = await apiFetch("./api/singbox/config", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ nodes: singboxNodes, apply: true }) });
     singboxNodes = data.nodes || singboxNodes;
+    singboxDirty = false;
+    $("singbox_dirty_status").style.display = "none";
     renderSingboxNodeSelect();
     fillSingboxForm(selectedSingboxNode());
     await renderSingboxLinks();
