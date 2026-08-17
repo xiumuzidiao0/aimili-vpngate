@@ -90,7 +90,7 @@ VLESS-REALITY 客户端 -> sing-box -> 127.0.0.1:7928 -> OpenVPN tun0 -> VPNGate
 * **⚙️ 本地其他服务配置**:
   将本机的其他代理工具、爬虫框架或服务的出战代理设置为 `127.0.0.1:7928`。
 
-> 💡 **小贴士**：如果您确实需要对公网其他设备开放此代理端口，可以通过设置环境变量 `export LOCAL_PROXY_HOST="::"` 重新启动服务以允许公网接入。
+> **安全提示**：`7928/7929/...` 是 sing-box 与 VPNGate 出口之间的内部回环端口。请勿将它们绑定或开放到公网；外部客户端应只连接 sing-box 节点配置的公网入口端口。
 
 ---
 
@@ -113,15 +113,17 @@ VLESS-REALITY 客户端 -> sing-box -> 127.0.0.1:7928 -> OpenVPN tun0 -> VPNGate
 * **解决办法**：请登录您的 VPS 服务商控制面板（如 SolusVM/Proxmox），找到 **Enable TUN/TAP** / **开启 TUN** 选项并启用，然后重启 VPS。如无此选项，请工单联系客服开启。
 
 #### 2. 网页管理后台无法打开（链接超时或拒绝连接）
-* **原因 1**：VPS 本身自带防火墙（如 UFW、firewalld 或 iptables）阻断了管理端口（默认 `8787`）或代理端口（默认 `7928`）。
-* **解决办法 1**：请在终端放行对应端口：
-  * **UFW (Ubuntu/Debian)**: `ufw allow 8787/tcp && ufw allow 7928/tcp`
-  * **Firewalld (CentOS/RHEL)**: `firewall-cmd --zone=public --add-port=8787/tcp --permanent && firewall-cmd --zone=public --add-port=7928/tcp --permanent && firewall-cmd --reload`
+* **原因 1**：VPS 本身自带防火墙（如 UFW、firewalld 或 iptables）阻断了 Web UI 端口（默认 `8787`）。
+* **解决办法 1**：只放行 Web UI 端口和实际启用的 sing-box 公网入口端口，例如：
+  * **UFW (Ubuntu/Debian)**: `ufw allow 8787/tcp`
+  * **Firewalld (CentOS/RHEL)**: `firewall-cmd --zone=public --add-port=8787/tcp --permanent && firewall-cmd --reload`
 * **原因 2**：云服务商的“安全组”或“网络访问控制列表 (ACL)”未放行端口。
-* **解决办法 2**：**非常重要！** 登录云服务商控制台（如阿里云、腾讯云、AWS、Oracle Cloud等），找到您 VPS 实例的 **安全组规则 (Security Group)**，在入站规则中添加：
+* **解决办法 2**：登录云服务商控制台，找到 VPS 的 **安全组规则 (Security Group)**，添加 Web UI 和 sing-box 公网入口规则：
   - **协议类型**: `TCP`
-  - **端口范围**: `8787` (管理网页) 和 `7928` (代理端口)
-  - **授权对象/源IP**: `0.0.0.0/0` (允许所有人，或指定您自己的家庭公网 IP 提高安全性)
+  - **端口范围**: `8787`（管理网页）以及您创建的 sing-box 公网入口端口
+  - **授权对象/源 IP**: Web UI 建议只允许您自己的固定 IP；协议入口按实际客户端来源配置
+
+`7928/7929/...` 仅监听 `127.0.0.1`，不需要也不应加入防火墙或安全组的公网入站规则。
 
 #### 3. 页面提示 `API Domain Blocked` 且备选节点显示为 0
 * **原因**：您的 VPS DNS 解析异常，或者官方 VPNGate 域名遭防火墙拦截污染，导致无法下载节点列表。
@@ -224,7 +226,7 @@ Under `Admin -> VPN Exits`, add an independent exit such as `127.0.0.1:7929 -> t
 * **⚙️ Other local services**:
   Configure your scrapers, frameworks, or utility tools on this VPS to send traffic via `127.0.0.1:7928`.
 
-> 💡 **Quick Note**: If you really need to open this proxy port to the public internet, you can set the environment variable `export LOCAL_PROXY_HOST="::"` before running the manager.
+> **Security note**: Ports `7928/7929/...` are internal loopback hops between sing-box and VPNGate exits. Do not bind or expose them publicly; external clients should connect only to configured sing-box inbound ports.
 
 ---
 
@@ -235,12 +237,14 @@ Under `Admin -> VPN Exits`, add an independent exit such as `127.0.0.1:7929 -> t
 * **Solution**: Enable **TUN/TAP** in your VPS SolusVM/KiwiVM control panel, or submit a support ticket to your hosting provider.
 
 #### 2. Cannot open the Web UI in the browser
-* **Reason 1**: The built-in firewall (UFW or firewalld) is blocking ports `8787` (Web UI) and `7928` (Proxy).
-* **Solution 1**: Allow the ports in your OS firewall:
-  * **UFW**: `ufw allow 8787/tcp && ufw allow 7928/tcp`
-  * **Firewalld**: `firewall-cmd --add-port=8787/tcp --permanent && firewall-cmd --add-port=7928/tcp --permanent && firewall-cmd --reload`
+* **Reason 1**: The built-in firewall (UFW or firewalld) is blocking the Web UI port `8787`.
+* **Solution 1**: Allow the Web UI and the sing-box public inbound ports you actually use:
+  * **UFW**: `ufw allow 8787/tcp`
+  * **Firewalld**: `firewall-cmd --add-port=8787/tcp --permanent && firewall-cmd --reload`
 * **Reason 2**: Service provider security group blocking ports.
-* **Solution 2**: **Crucial!** Log in to your cloud provider console (AWS, Aliyun, Oracle Cloud, etc.), locate the **Security Group** for your instance, and add an inbound TCP rule to allow ports `8787` and `7928` from `0.0.0.0/0`.
+* **Solution 2**: In your cloud provider's **Security Group**, allow `8787` and the configured sing-box public inbound ports. Restrict Web UI access to your own source IP whenever possible.
+
+Ports `7928/7929/...` listen on `127.0.0.1` only and must not be added to public firewall or security-group rules.
 
 #### 3. "API Domain Blocked" / Candidate nodes pool is empty (0 nodes)
 * **Reason**: The official VPNGate domain is blocked or DNS resolution failed on your VPS.

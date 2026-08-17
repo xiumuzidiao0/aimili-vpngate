@@ -224,12 +224,38 @@ class VpnExitTests(unittest.TestCase):
         self.assertEqual(exits[0]["name"], "默认出口")
         self.assertEqual(exits[0]["ip_type"], "residential")
         self.assertEqual(exits[1]["proxy_port"], 7929)
+        self.assertEqual(exits[1]["tun_name"], "tun1")
+        self.assertEqual(exits[1]["route_table"], 101)
         self.assertEqual(exits[1]["country"], "美国")
         bound = vpngate_manager.bind_singbox_nodes_to_vpn_exits(
             [{"id": "client-us", "vpn_exit_id": "usa"}],
             vpngate_manager.current_vpn_exits({**ui_config, "vpn_exits": exits}),
         )
         self.assertEqual(bound[0]["local_http_port"], 7929)
+
+    def test_vpn_exit_tun_and_route_assignment_survives_reordering(self):
+        ui_config = {
+            "proxy_port": 7928,
+            "port": 8787,
+            "singbox": {"nodes": []},
+            "vpn_exits": [
+                {"id": "default", "proxy_port": 7928, "tun_name": "tun0", "route_table": 100},
+                {"id": "usa", "proxy_port": 7929, "tun_name": "tun1", "route_table": 101},
+                {"id": "japan", "proxy_port": 7930, "tun_name": "tun2", "route_table": 102},
+            ],
+        }
+        reordered = [
+            {"id": "default", "node_id": "", "proxy_port": 7928},
+            {"id": "japan", "node_id": "", "proxy_port": 7930},
+            {"id": "usa", "node_id": "", "proxy_port": 7929},
+        ]
+
+        with patch.object(vpngate_manager, "read_nodes", return_value=[]):
+            normalized = vpngate_manager.normalize_vpn_exits(reordered, ui_config)
+
+        by_id = {item["id"]: item for item in normalized}
+        self.assertEqual((by_id["usa"]["tun_name"], by_id["usa"]["route_table"]), ("tun1", 101))
+        self.assertEqual((by_id["japan"]["tun_name"], by_id["japan"]["route_table"]), ("tun2", 102))
 
     def test_bind_rejects_unknown_exit(self):
         with self.assertRaises(singbox_manager.SingBoxError):

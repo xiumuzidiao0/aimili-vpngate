@@ -17,6 +17,8 @@ import urllib.parse
 from pathlib import Path
 from typing import Any
 
+import config_store
+
 
 SINGBOX_DIR = Path(os.environ.get("SINGBOX_DIR", "/etc/sing-box"))
 SINGBOX_BIN = Path(os.environ.get("SINGBOX_BIN", str(SINGBOX_DIR / "bin" / "sing-box")))
@@ -68,6 +70,57 @@ SERVER_NAME_RE = re.compile(r"^(?=.{1,253}$)[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0
 
 class SingBoxError(RuntimeError):
     """A safe, user-facing sing-box integration error."""
+
+
+def runtime_backup_path() -> Path:
+    return SINGBOX_CONFIG.with_name("config.aimilivpn-backup.json")
+
+
+def _write_runtime_config(config: dict[str, Any]) -> None:
+    SINGBOX_CONFIG.parent.mkdir(parents=True, exist_ok=True)
+    if SINGBOX_CONFIG.is_file():
+        backup = runtime_backup_path()
+        try:
+            previous = json.loads(SINGBOX_CONFIG.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise SingBoxError("当前 sing-box 配置损坏，已拒绝覆盖") from exc
+        config_store.atomic_write_json(backup, previous)
+    config_store.atomic_write_json(SINGBOX_CONFIG, config)
+
+
+def restore_runtime_config() -> bool:
+    backup = runtime_backup_path()
+    if not backup.is_file():
+        SINGBOX_CONFIG.unlink(missing_ok=True)
+        return False
+    try:
+        previous = json.loads(backup.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SingBoxError("sing-box 备份配置损坏，无法回滚") from exc
+    if not isinstance(previous, dict):
+        raise SingBoxError("sing-box 备份配置格式无效，无法回滚")
+    validate_config(previous)
+    config_store.atomic_write_json(SINGBOX_CONFIG, previous)
+    return True
+
+
+def apply_saved_config(action: str = "reload") -> dict[str, Any]:
+    try:
+        return service_action(action)
+    except SingBoxError as apply_error:
+        restored = restore_runtime_config()
+        try:
+            if restored:
+                service_action("restart")
+            else:
+                service_action("stop")
+        except SingBoxError as rollback_error:
+            raise SingBoxError(
+                f"新配置应用失败，且旧配置恢复失败: {apply_error}; {rollback_error}"
+            ) from apply_error
+        if restored:
+            raise SingBoxError(f"新配置应用失败，已自动恢复旧配置: {apply_error}") from apply_error
+        raise SingBoxError(f"新配置应用失败，已移除首次生成的配置: {apply_error}") from apply_error
 
 
 def _run(command: list[str], timeout: int = 20, cwd: str | Path | None = None) -> subprocess.CompletedProcess[str]:
@@ -445,22 +498,7 @@ def save_config(settings: dict[str, Any], proxy_port: int, forbidden_ports: set[
     config = build_proxy_chain_config(normalized)
     validate_config(config)
 
-    SINGBOX_CONFIG.parent.mkdir(parents=True, exist_ok=True)
-    fd, temp_name = tempfile.mkstemp(prefix=".aimilivpn-config-", suffix=".json", dir=SINGBOX_CONFIG.parent)
-    temp_path = Path(temp_name)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            json.dump(config, handle, ensure_ascii=False, indent=2)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.chmod(temp_path, 0o600)
-        if SINGBOX_CONFIG.exists():
-            backup = SINGBOX_CONFIG.with_name("config.aimilivpn-backup.json")
-            shutil.copy2(SINGBOX_CONFIG, backup)
-            os.chmod(backup, 0o600)
-        os.replace(temp_path, SINGBOX_CONFIG)
-    finally:
-        temp_path.unlink(missing_ok=True)
+    _write_runtime_config(config)
 
     normalized["last_apply_at"] = int(time.time())
     normalized["last_error"] = ""
@@ -557,22 +595,7 @@ def save_nodes(
     config = build_proxy_chain_nodes(nodes)
     validate_config(config)
 
-    SINGBOX_CONFIG.parent.mkdir(parents=True, exist_ok=True)
-    fd, temp_name = tempfile.mkstemp(prefix=".aimilivpn-config-", suffix=".json", dir=SINGBOX_CONFIG.parent)
-    temp_path = Path(temp_name)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            json.dump(config, handle, ensure_ascii=False, indent=2)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.chmod(temp_path, 0o600)
-        if SINGBOX_CONFIG.exists():
-            backup = SINGBOX_CONFIG.with_name("config.aimilivpn-backup.json")
-            shutil.copy2(SINGBOX_CONFIG, backup)
-            os.chmod(backup, 0o600)
-        os.replace(temp_path, SINGBOX_CONFIG)
-    finally:
-        temp_path.unlink(missing_ok=True)
+    _write_runtime_config(config)
 
     timestamp = int(time.time())
     for node in nodes:

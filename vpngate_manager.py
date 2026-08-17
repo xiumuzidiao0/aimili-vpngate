@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import base64
+import copy
 import csv
 import ipaddress
 import json
@@ -80,6 +81,7 @@ class DualStackHTTPServer(ThreadingHTTPServer):
 import vpn_utils
 import proxy_server
 import singbox_manager
+import config_store
 
 def env_int(name: str, default: int, min_value: int | None = None, max_value: int | None = None) -> int:
     raw = os.environ.get(name)
@@ -133,6 +135,7 @@ AUTH_FILE = DATA_DIR / "vpngate_auth.txt"
 UPSTREAM_PROXY_AUTH_FILE = DATA_DIR / "upstream_proxy_auth.txt"
 BLACKLIST_FILE = DATA_DIR / "blacklist.json"
 PUBLIC_IP_FILE = DATA_DIR / "public_ip.txt"
+UI_CONFIG_FILE = DATA_DIR / "ui_auth.json"
 PUBLIC_IP_ENDPOINTS = ("https://api.ipify.org", "https://api64.ipify.org")
 
 lock = threading.RLock()
@@ -213,9 +216,7 @@ def detect_public_ip() -> str:
 
 def write_json(path: Path, data: Any) -> None:
     with lock:
-        tmp = path.with_suffix(path.suffix + ".tmp")
-        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-        tmp.replace(path)
+        config_store.atomic_write_json(path, data)
 
 def read_json(path: Path, default: Any) -> Any:
     with lock:
@@ -254,8 +255,9 @@ def generate_random_username() -> str:
 
 def load_ui_config() -> dict[str, Any]:
     with lock:
-        auth_file = DATA_DIR / "ui_auth.json"
+        auth_file = UI_CONFIG_FILE
         config = {
+            "schema_version": config_store.CURRENT_SCHEMA_VERSION,
             "username": "",
             "secret_path": "EJsW2EeBo9lY",
             "password": "",
@@ -270,6 +272,7 @@ def load_ui_config() -> dict[str, Any]:
             "favorite_node_ids": [],
             "fav_fail_fallback": False,
             "vpn_exits": [],
+            "desired_state": {"singbox": "stopped", "vpn_exits": {}},
             "singbox": {
                 "enabled": False,
                 "chain_enabled": False,
@@ -288,16 +291,15 @@ def load_ui_config() -> dict[str, Any]:
             }
         }
         updated = False
+        migration_changed = False
         if auth_file.exists():
-            try:
-                data = json.loads(auth_file.read_text(encoding="utf-8"))
-                for key, val in data.items():
-                    config[key] = val
-                for key in ["host", "port", "proxy_port", "routing_mode", "force_country", "routing_ip_type", "connection_enabled", "fixed_node_id", "favorite_node_ids", "fav_fail_fallback", "singbox"]:
-                    if key not in data:
-                        updated = True
-            except Exception:
-                pass
+            data = config_store.read_json_object(auth_file)
+            data, migration_changed = config_store.migrate_ui_config(data)
+            for key, val in data.items():
+                config[key] = val
+            for key in ["host", "port", "proxy_port", "routing_mode", "force_country", "routing_ip_type", "connection_enabled", "fixed_node_id", "favorite_node_ids", "fav_fail_fallback", "singbox"]:
+                if key not in data:
+                    updated = True
         
         if not config.get("username"):
             config["username"] = generate_random_username()
@@ -331,6 +333,35 @@ def load_ui_config() -> dict[str, Any]:
                 "tun_name": "tun0", "enabled": True,
             }]
             updated = True
+        desired_state = config.get("desired_state")
+        if not isinstance(desired_state, dict):
+            desired_state = {}
+            config["desired_state"] = desired_state
+            updated = True
+        if desired_state.get("singbox") not in {"running", "stopped"}:
+            desired_state["singbox"] = "stopped"
+            updated = True
+        desired_exits = desired_state.get("vpn_exits")
+        if not isinstance(desired_exits, dict):
+            desired_exits = {}
+            desired_state["vpn_exits"] = desired_exits
+            updated = True
+        valid_exit_ids = {
+            str(item.get("id")) for item in config["vpn_exits"]
+            if isinstance(item, dict) and item.get("id")
+        }
+        normalized_desired_exits = {
+            exit_id: state for exit_id, state in desired_exits.items()
+            if exit_id in valid_exit_ids and state in {"running", "stopped"}
+        }
+        for exit_id in valid_exit_ids:
+            normalized_desired_exits.setdefault(
+                exit_id,
+                "running" if exit_id == "default" and config.get("connection_enabled", True) else "stopped",
+            )
+        if normalized_desired_exits != desired_exits:
+            desired_state["vpn_exits"] = normalized_desired_exits
+            updated = True
         default_singbox = singbox_manager.default_settings(normalized_proxy_port)
         default_singbox["enabled"] = False
         default_singbox["chain_enabled"] = False
@@ -357,12 +388,16 @@ def load_ui_config() -> dict[str, Any]:
                 config["singbox"].pop(legacy_key, None)
                 updated = True
             
-        if not auth_file.exists() or updated:
+        if not auth_file.exists() or updated or migration_changed:
             try:
                 DATA_DIR.mkdir(exist_ok=True, parents=True)
-                write_json(auth_file, config)
+                config_store.save_versioned_config(
+                    auth_file,
+                    config,
+                    create_backup=auth_file.exists(),
+                )
             except Exception:
-                pass
+                raise
                 
         return config
 
@@ -478,10 +513,10 @@ def get_state() -> dict[str, Any]:
     return state
 
 def save_ui_config(ui_cfg: dict[str, Any]) -> None:
-    auth_file = DATA_DIR / "ui_auth.json"
     with lock:
         DATA_DIR.mkdir(exist_ok=True, parents=True)
-        write_json(auth_file, ui_cfg)
+        normalized, _ = config_store.migrate_ui_config(ui_cfg)
+        config_store.save_versioned_config(UI_CONFIG_FILE, normalized, create_backup=True)
 
 def current_singbox_settings(ui_cfg: dict[str, Any] | None = None) -> dict[str, Any]:
     ui_cfg = ui_cfg or load_ui_config()
@@ -516,6 +551,24 @@ def current_singbox_nodes(ui_cfg: dict[str, Any] | None = None) -> list[dict[str
     return [legacy]
 
 
+def allocate_vpn_exit_slot(raw: dict[str, Any], used_slots: set[int]) -> int:
+    tun_match = re.fullmatch(r"tun([1-9][0-9]?)", str(raw.get("tun_name") or ""))
+    try:
+        route_table = int(raw.get("route_table"))
+    except (TypeError, ValueError):
+        route_table = 0
+    if tun_match:
+        preferred = int(tun_match.group(1))
+        if route_table == 100 + preferred and preferred not in used_slots:
+            used_slots.add(preferred)
+            return preferred
+    for slot in range(1, 33):
+        if slot not in used_slots:
+            used_slots.add(slot)
+            return slot
+    raise ValueError("可用的 VPN 出口隧道编号已耗尽")
+
+
 def current_vpn_exits(ui_cfg: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     ui_cfg = ui_cfg or load_ui_config()
     raw_exits = ui_cfg.get("vpn_exits", [])
@@ -527,18 +580,18 @@ def current_vpn_exits(ui_cfg: dict[str, Any] | None = None) -> list[dict[str, An
     ordered = ([default_raw] if default_raw else []) + [
         item for item in raw_exits if item is not default_raw
     ]
-    extra_index = 1
+    used_slots: set[int] = set()
     for raw in ordered:
         if not isinstance(raw, dict):
             continue
         exit_id = str(raw.get("id") or "").strip()
         if not re.fullmatch(r"[a-zA-Z0-9_-]{3,32}", exit_id) or any(item["id"] == exit_id for item in exits):
             continue
-        port = bounded_int(raw.get("proxy_port"), LOCAL_PROXY_PORT + extra_index - 1, 1024, 65535)
+        is_default = exit_id == "default"
+        slot = 0 if is_default else allocate_vpn_exit_slot(raw, used_slots)
+        port = bounded_int(raw.get("proxy_port"), LOCAL_PROXY_PORT + slot, 1024, 65535)
         if port in used_ports:
             continue
-        is_default = exit_id == "default"
-        tun_name = "tun0" if is_default else f"tun{extra_index}"
         exits.append({
             "id": exit_id,
             "name": str(raw.get("name") or exit_id).strip()[:64] or exit_id,
@@ -546,14 +599,67 @@ def current_vpn_exits(ui_cfg: dict[str, Any] | None = None) -> list[dict[str, An
             "country": str(raw.get("country") or "").strip(),
             "ip_type": str(raw.get("ip_type") or "all").strip().lower(),
             "proxy_port": port,
-            "tun_name": tun_name,
-            "route_table": 100 if is_default else 100 + extra_index,
+            "tun_name": f"tun{slot}",
+            "route_table": 100 + slot,
             "enabled": bool(raw.get("enabled", True)),
         })
         used_ports.add(port)
-        if not is_default:
-            extra_index += 1
     return exits
+
+
+def update_desired_vpn_exit_state(ui_cfg: dict[str, Any], exit_id: str, desired: str) -> None:
+    if desired not in {"running", "stopped"}:
+        raise ValueError("VPN 出口声明状态无效")
+    exit_ids = {item["id"] for item in current_vpn_exits(ui_cfg)}
+    if exit_id not in exit_ids:
+        raise ValueError("未找到 VPN 出口")
+    desired_state = ui_cfg.setdefault("desired_state", {})
+    desired_exits = desired_state.setdefault("vpn_exits", {})
+    desired_exits[exit_id] = desired
+    if exit_id == "default":
+        ui_cfg["connection_enabled"] = desired == "running"
+
+
+def reconcile_declared_runtime(ui_cfg: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Restore declared services after an AimiliVPN process or host restart."""
+    ui_cfg = ui_cfg or load_ui_config()
+    desired_state = ui_cfg.get("desired_state", {})
+    desired_exits = desired_state.get("vpn_exits", {}) if isinstance(desired_state, dict) else {}
+    results: dict[str, Any] = {"singbox": {}, "vpn_exits": {}}
+
+    singbox_desired = desired_state.get("singbox", "stopped") if isinstance(desired_state, dict) else "stopped"
+    try:
+        singbox_status = singbox_manager.status()
+        if singbox_desired == "running" and not singbox_status.get("running"):
+            singbox_status = singbox_manager.service_action("start")
+        elif singbox_desired == "stopped" and singbox_status.get("running"):
+            singbox_status = singbox_manager.service_action("stop")
+        results["singbox"] = {"ok": True, "desired": singbox_desired, "status": singbox_status}
+    except Exception as exc:
+        message = str(exc)
+        results["singbox"] = {"ok": False, "desired": singbox_desired, "error": message}
+        log_to_json("ERROR", "SingBox", f"恢复 sing-box 声明状态失败: {message}")
+
+    # The default exit is reconciled by the existing collector/auto-switch loop.
+    # Extra exits require explicit restoration because their processes live only
+    # in this AimiliVPN process.
+    for exit_config in current_vpn_exits(ui_cfg):
+        exit_id = exit_config["id"]
+        desired = desired_exits.get(exit_id, "running" if exit_id == "default" else "stopped")
+        if exit_id == "default":
+            results["vpn_exits"][exit_id] = {"ok": True, "desired": desired, "managed_by": "collector"}
+            continue
+        try:
+            if desired == "running" and exit_config.get("enabled"):
+                status_result = start_vpn_exit(exit_id)
+            else:
+                status_result = vpn_exit_status(exit_config)
+            results["vpn_exits"][exit_id] = {"ok": True, "desired": desired, "status": status_result}
+        except Exception as exc:
+            message = str(exc)
+            results["vpn_exits"][exit_id] = {"ok": False, "desired": desired, "error": message}
+            log_to_json("ERROR", "VPN", f"恢复 VPN 出口 {exit_id} 失败: {message}")
+    return results
 
 
 def vpn_exit_status(exit_config: dict[str, Any]) -> dict[str, Any]:
@@ -628,9 +734,12 @@ def normalize_vpn_exits(raw_exits: Any, ui_cfg: dict[str, Any]) -> list[dict[str
         "ip_type": default_ip_type,
         "proxy_port": default_port,
         "tun_name": "tun0",
+        "route_table": 100,
         "enabled": True,
     }]
     used_ports = {default_port}
+    used_slots: set[int] = set()
+    existing_by_id = {item["id"]: item for item in current_vpn_exits(ui_cfg)}
     for exit_id, raw in incoming_by_id.items():
         try:
             proxy_port = int(raw.get("proxy_port"))
@@ -647,6 +756,8 @@ def normalize_vpn_exits(raw_exits: Any, ui_cfg: dict[str, Any]) -> list[dict[str
         node_id = str(raw.get("node_id") or "").strip()
         if node_id and node_id not in node_ids:
             raise ValueError("VPN 出口选择的 VPNGate 节点不存在")
+        allocation_source = existing_by_id.get(exit_id, raw)
+        slot = allocate_vpn_exit_slot(allocation_source, used_slots)
         normalized.append({
             "id": exit_id,
             "name": str(raw.get("name") or exit_id).strip()[:64] or exit_id,
@@ -654,7 +765,8 @@ def normalize_vpn_exits(raw_exits: Any, ui_cfg: dict[str, Any]) -> list[dict[str
             "country": country,
             "ip_type": ip_type,
             "proxy_port": proxy_port,
-            "tun_name": "",
+            "tun_name": f"tun{slot}",
+            "route_table": 100 + slot,
             "enabled": bool(raw.get("enabled", True)),
         })
         used_ports.add(proxy_port)
@@ -6642,6 +6754,17 @@ class Handler(BaseHTTPRequestHandler):
                     if new_exit is None or any(old_exit[field] != new_exit[field] for field in fields):
                         stop_vpn_exit(exit_id)
                 ui_cfg["vpn_exits"] = normalized
+                previous_desired = ui_cfg.get("desired_state", {}).get("vpn_exits", {})
+                if not isinstance(previous_desired, dict):
+                    previous_desired = {}
+                desired_exits = {
+                    item["id"]: (
+                        previous_desired.get(item["id"], "running" if item["id"] == "default" else "stopped")
+                        if item.get("enabled") else "stopped"
+                    )
+                    for item in current_vpn_exits(ui_cfg)
+                }
+                ui_cfg.setdefault("desired_state", {})["vpn_exits"] = desired_exits
                 save_ui_config(ui_cfg)
                 self.send_json({
                     "ok": True,
@@ -6668,6 +6791,13 @@ class Handler(BaseHTTPRequestHandler):
                     message = "VPN 出口已停止"
                 else:
                     raise ValueError("不支持的 VPN 出口操作")
+                ui_cfg = load_ui_config()
+                update_desired_vpn_exit_state(
+                    ui_cfg,
+                    exit_id,
+                    "running" if action == "start" else "stopped",
+                )
+                save_ui_config(ui_cfg)
                 self.send_json({"ok": True, "message": message, "exit": result})
             except (ValueError, RuntimeError) as exc:
                 self.send_json({"ok": False, "error": str(exc)}, HTTPStatus.BAD_REQUEST)
@@ -6736,16 +6866,28 @@ class Handler(BaseHTTPRequestHandler):
                 saved = singbox_manager.save_nodes(
                     settings, proxy_port, forbidden_ports, {item["proxy_port"] for item in exits},
                 )
+                previous_ui_cfg = copy.deepcopy(ui_cfg)
                 ui_cfg["singbox"]["nodes"] = saved
                 ui_cfg["singbox"].update(saved[0])
-                save_ui_config(ui_cfg)
+                should_run = any(node["enabled"] and node["chain_enabled"] for node in saved)
+                ui_cfg.setdefault("desired_state", {}).setdefault("vpn_exits", {})
+                ui_cfg["desired_state"]["singbox"] = "running" if should_run else "stopped"
+                try:
+                    save_ui_config(ui_cfg)
+                except Exception:
+                    singbox_manager.restore_runtime_config()
+                    raise
 
                 action_result = None
                 if payload.get("apply", True):
-                    if any(node["enabled"] and node["chain_enabled"] for node in saved):
-                        action_result = singbox_manager.service_action("reload")
-                    else:
-                        action_result = singbox_manager.service_action("stop")
+                    try:
+                        if should_run:
+                            action_result = singbox_manager.apply_saved_config("reload")
+                        else:
+                            action_result = singbox_manager.service_action("stop")
+                    except singbox_manager.SingBoxError:
+                        save_ui_config(previous_ui_cfg)
+                        raise
                 self.send_json({
                     "ok": True,
                     "message": "sing-box 节点配置已保存" + ("并已应用" if action_result else ""),
@@ -7345,6 +7487,12 @@ def main() -> None:
     threading.Thread(target=collector_loop, daemon=True).start()
     threading.Thread(target=background_proxy_checker, daemon=True).start()
     threading.Thread(target=active_node_pinger, daemon=True).start()
+    threading.Thread(
+        target=reconcile_declared_runtime,
+        args=(startup_cfg,),
+        name="runtime-reconciler-startup",
+        daemon=True,
+    ).start()
     
     ui_cfg = load_ui_config()
     ui_host = ui_cfg.get("host", UI_HOST)
