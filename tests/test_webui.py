@@ -46,6 +46,14 @@ class WebUiContractTests(unittest.TestCase):
 
         self.assertGreaterEqual(installer.count("qrencode"), 3)
 
+    def test_readme_installer_does_not_execute_http_error_pages(self):
+        readme = Path(__file__).resolve().parents[1].joinpath("README.md").read_text(encoding="utf-8")
+
+        self.assertNotIn("bash <(curl -Ls https://raw.githubusercontent.com", readme)
+        self.assertGreaterEqual(readme.count("https://cdn.jsdelivr.net/gh/xiumuzidiao0/aimili-vpngate@main/install.sh"), 2)
+        self.assertGreaterEqual(readme.count("curl -LfsS"), 2)
+        self.assertGreaterEqual(readme.count("grep -q '^#!/usr/bin/env bash'"), 2)
+
     def test_qr_generation_passes_credentials_over_stdin(self):
         node = vpngate_manager.singbox_manager.default_settings(7928)
         node.update({

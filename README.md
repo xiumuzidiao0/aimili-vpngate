@@ -36,8 +36,9 @@ AimiliVPN 是一款基于官方 VPNGate 开放协议的高性能 VPN 代理网�
 
 #### 🌟 正式稳定版本 (main 分支)
 ```bash
-bash <(curl -Ls https://raw.githubusercontent.com/xiumuzidiao0/aimili-vpngate/main/install.sh)
+tmp=$(mktemp) && curl -LfsS --retry 5 --retry-delay 2 --connect-timeout 15 -o "$tmp" https://cdn.jsdelivr.net/gh/xiumuzidiao0/aimili-vpngate@main/install.sh && head -n 1 "$tmp" | grep -q '^#!/usr/bin/env bash' && bash "$tmp"; rc=$?; [ -z "${tmp:-}" ] || rm -f "$tmp"; (exit "$rc")
 ```
+该命令会在执行前检查 HTTP 状态和脚本头。如果下载站返回 `429`、`404` 或 HTML 错误页，安装会直接失败并显示错误，不会把错误页交给 `bash`。
 > 💡 **小贴士**：部署完成后，终端会输出管理网页的专属链接（含随机安全后缀，如 `http://your_vps_ip:8787/u71e9IXp4TPx`）。在终端中输入 `ml` 命令可以随时调出交互式命令行管理菜单。
 
 ---
@@ -135,6 +136,10 @@ VLESS-REALITY 客户端 -> sing-box -> 127.0.0.1:7928 -> OpenVPN tun0 -> VPNGate
 * **原因**：部分系统启用了严格的反向路径过滤（`rp_filter`），导致策略路由的入站/出站数据包被系统误判丢弃。
 * **解决办法**：在终端输入 `ml` 命令打开交互菜单，工具会自动检测并提示您将 `rp_filter` 修复为宽松模式（值为 `2`）。
 
+#### 5. 部署命令出现 `429: command not found`
+* **原因**：`raw.githubusercontent.com` 对当前网络或共享出口进行了请求限流，旧命令把返回的限流说明误当成了 Shell 脚本。
+* **解决办法**：使用 README 顶部新的 jsDelivr 部署命令。新命令启用了 HTTP 错误检查，并在执行前验证脚本头。
+
 ---
 
 ### 🎁 捐赠支持项目开发
@@ -177,8 +182,10 @@ Run the corresponding command on your Linux VPS as root:
 
 #### 🌟 Stable Release (main branch)
 ```bash
-bash <(curl -Ls https://raw.githubusercontent.com/xiumuzidiao0/aimili-vpngate/main/install.sh)
+tmp=$(mktemp) && curl -LfsS --retry 5 --retry-delay 2 --connect-timeout 15 -o "$tmp" https://cdn.jsdelivr.net/gh/xiumuzidiao0/aimili-vpngate@main/install.sh && head -n 1 "$tmp" | grep -q '^#!/usr/bin/env bash' && bash "$tmp"; rc=$?; [ -z "${tmp:-}" ] || rm -f "$tmp"; (exit "$rc")
 ```
+
+The command checks the HTTP response and script shebang before execution, so a `429`, `404`, or HTML error page is never passed to `bash`.
 
 > 💡 **Quick Note**: Once installed, copy the printed URL from the terminal to access the Web UI. Type the `ml` command in the terminal to summon the interactive CLI management console.
 
