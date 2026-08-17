@@ -133,6 +133,7 @@ LOGIN_ATTEMPT_WINDOW_SECONDS = 5 * 60
 LOGIN_ATTEMPT_LIMIT = 10
 RUNTIME_RECONCILE_SECONDS = env_int("RUNTIME_RECONCILE_SECONDS", 30, 5, 3600)
 RUNTIME_RETRY_MAX_SECONDS = env_int("RUNTIME_RETRY_MAX_SECONDS", 15 * 60, 30, 24 * 60 * 60)
+VPN_EXIT_HEALTH_CHECK_SECONDS = env_int("VPN_EXIT_HEALTH_CHECK_SECONDS", 60, 15, 3600)
 
 ROOT_DIR = Path(sys.executable).resolve().parent if globals().get("__compiled__") else Path(__file__).resolve().parent
 DATA_DIR = Path(os.environ["VPNGATE_DATA_DIR"]).resolve() if os.environ.get("VPNGATE_DATA_DIR") else ROOT_DIR / "vpngate_data"
@@ -223,6 +224,17 @@ def wait_for_tcp_listener(host: str, port: int, timeout: float = 3.0) -> bool:
                 return True
         except OSError:
             time.sleep(0.1)
+    return False
+
+
+def wait_for_tcp_listener_closed(host: str, port: int, timeout: float = 2.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            with socket.create_connection((host, port), timeout=0.2):
+                time.sleep(0.1)
+        except OSError:
+            return True
     return False
 
 def upstream_proxy_auth_file() -> str | None:
@@ -723,6 +735,39 @@ def reconcile_declared_runtime(
                         "error": current_status.get("runtime", {}).get("error", "等待自动重试"),
                     }
                     continue
+                runtime = current_status.get("runtime", {})
+                last_health_check = float(runtime.get("health_checked_at", 0) or 0)
+                if (
+                    current_status.get("running")
+                    and vpn_exit_uses_auto_selection(exit_config)
+                    and current_time - last_health_check >= VPN_EXIT_HEALTH_CHECK_SECONDS
+                ):
+                    health = check_proxy_health(
+                        proxy_port=exit_config["proxy_port"],
+                        proxy_host="127.0.0.1",
+                        tun_name=exit_config["tun_name"],
+                    )
+                    if health.get("ok"):
+                        set_vpn_exit_runtime(
+                            exit_id,
+                            "healthy",
+                            health_checked_at=current_time,
+                            egress_ip=health.get("ip", ""),
+                            latency_ms=health.get("latency_ms", 0),
+                        )
+                    else:
+                        failed_node_id = str(current_status.get("active_node_id") or "")
+                        error = str(health.get("error") or "VPN 出口健康检查失败")
+                        mark_vpn_exit_node_unavailable(failed_node_id, error)
+                        stop_vpn_exit(exit_id)
+                        set_vpn_exit_runtime(
+                            exit_id,
+                            "failed",
+                            node_id=failed_node_id,
+                            automatic=True,
+                            health_checked_at=current_time,
+                            error=error,
+                        )
                 status_result = start_vpn_exit(exit_id)
                 vpn_exit_retry_states.pop(exit_id, None)
             else:
@@ -774,8 +819,8 @@ def vpn_exit_status(exit_config: dict[str, Any]) -> dict[str, Any]:
     else:
         process = vpn_exit_processes.get(exit_id)
         running = process is not None and process.poll() is None
-        node_id = exit_config.get("node_id", "")
         runtime = vpn_exit_runtime_states.get(exit_id, {})
+        node_id = runtime.get("node_id") or exit_config.get("node_id", "")
         phase = runtime.get("phase") or ("proxy_ready" if running else "stopped")
         if not running and phase in {"connecting", "tunnel_ready", "proxy_ready", "healthy"}:
             runtime = set_vpn_exit_runtime(exit_id, "failed", error="OpenVPN 进程已退出")
@@ -917,68 +962,161 @@ def bind_singbox_nodes_to_vpn_exits(raw_nodes: list[dict[str, Any]], exits: list
     return bound_nodes
 
 
+def vpn_exit_uses_auto_selection(exit_config: dict[str, Any]) -> bool:
+    return not str(exit_config.get("node_id") or "").strip()
+
+
+def default_vpn_exit_auto_config(ui_cfg: dict[str, Any]) -> dict[str, Any] | None:
+    default_exit = next((item for item in current_vpn_exits(ui_cfg) if item["id"] == "default"), None)
+    return default_exit if default_exit and vpn_exit_uses_auto_selection(default_exit) else None
+
+
+def filter_vpn_exit_candidates(
+    nodes: list[dict[str, Any]],
+    exit_config: dict[str, Any],
+    include_unknown_ip_type: bool = False,
+    require_available: bool = True,
+) -> list[dict[str, Any]]:
+    country = str(exit_config.get("country") or "").strip()
+    ip_type = str(exit_config.get("ip_type") or "all").strip().lower()
+    candidates = [
+        node for node in nodes
+        if not require_available or node.get("probe_status") == "available"
+    ]
+    if country:
+        candidates = [node for node in candidates if country_matches(node.get("country"), country)]
+    if ip_type == "residential":
+        candidates = [
+            node for node in candidates
+            if node.get("ip_type") in {"residential", "mobile"}
+            or (include_unknown_ip_type and not node.get("ip_type"))
+        ]
+    elif ip_type == "hosting":
+        candidates = [
+            node for node in candidates
+            if node.get("ip_type") == "hosting"
+            or (include_unknown_ip_type and not node.get("ip_type"))
+        ]
+    candidates.sort(key=lambda node: (
+        parse_int(node.get("latency_ms")) or parse_int(node.get("ping")) or 999999,
+        -parse_int(node.get("score")),
+        -parse_int(node.get("speed")),
+    ))
+    return candidates
+
+
+def vpn_exit_candidate_nodes(exit_config: dict[str, Any]) -> list[dict[str, Any]]:
+    nodes = read_nodes()
+    selected_id = str(exit_config.get("node_id") or "").strip()
+    if selected_id:
+        selected = next((node for node in nodes if node.get("id") == selected_id), None)
+        if selected is None:
+            raise ValueError("所选 VPNGate 节点不存在，请先刷新节点")
+        return [selected]
+    candidates = filter_vpn_exit_candidates(nodes, exit_config)
+    if not candidates:
+        country = str(exit_config.get("country") or "所有国家")
+        ip_type = str(exit_config.get("ip_type") or "all")
+        raise ValueError(f"没有符合条件的已测速可用节点（国家: {country}，IP 类型: {ip_type}）")
+    return candidates
+
+
+def mark_vpn_exit_node_unavailable(node_id: str, message: str) -> None:
+    if not node_id:
+        return
+    with lock:
+        nodes = read_nodes()
+        changed = False
+        for node in nodes:
+            if node.get("id") == node_id:
+                node["probe_status"] = "unavailable"
+                node["probe_message"] = f"VPN 出口自动切换: {message}"[:500]
+                node["probed_at"] = time.time()
+                changed = True
+                break
+        if changed:
+            write_json(NODES_FILE, nodes)
+
+
 def start_vpn_exit(exit_id: str) -> dict[str, Any]:
     exit_config = next((item for item in current_vpn_exits() if item["id"] == exit_id), None)
     if not exit_config:
         raise ValueError("未找到 VPN 出口")
     if not exit_config.get("enabled"):
         raise ValueError("该 VPN 出口已禁用")
+    automatic = vpn_exit_uses_auto_selection(exit_config)
+    candidates = vpn_exit_candidate_nodes(exit_config)
+    attempts = candidates[:3] if automatic else candidates
     if exit_id == "default":
-        if not exit_config["node_id"]:
-            raise ValueError("请先为默认出口选择 VPNGate 节点")
-        set_vpn_exit_runtime(exit_id, "connecting", node_id=exit_config["node_id"])
-        try:
-            connect_node(exit_config["node_id"])
-            set_vpn_exit_runtime(exit_id, "healthy", node_id=exit_config["node_id"])
-            vpn_exit_retry_states.pop(exit_id, None)
-        except Exception as exc:
-            set_vpn_exit_runtime(exit_id, "failed", node_id=exit_config["node_id"], error=str(exc))
-            raise
-        return vpn_exit_status(exit_config)
-    if not exit_config["node_id"]:
-        raise ValueError("请先为出口选择 VPNGate 节点")
+        errors: list[str] = []
+        for node in attempts:
+            node_id = str(node.get("id") or "")
+            set_vpn_exit_runtime(exit_id, "connecting", node_id=node_id, automatic=automatic)
+            try:
+                connect_node(
+                    node_id,
+                    persist_selection=not automatic,
+                    exit_policy=exit_config if automatic else None,
+                )
+                set_vpn_exit_runtime(exit_id, "healthy", node_id=node_id, automatic=automatic)
+                vpn_exit_retry_states.pop(exit_id, None)
+                return vpn_exit_status(exit_config)
+            except Exception as exc:
+                errors.append(f"{node_id}: {exc}")
+                if automatic:
+                    mark_vpn_exit_node_unavailable(node_id, str(exc))
+        message = "; ".join(errors) or "VPNGate 自动选点失败"
+        set_vpn_exit_runtime(exit_id, "failed", automatic=automatic, error=message)
+        raise RuntimeError(message)
     with vpn_exit_lock:
         existing = vpn_exit_processes.get(exit_id)
         if existing is not None and existing.poll() is None:
             return vpn_exit_status(exit_config)
-        node = next((item for item in read_nodes() if item.get("id") == exit_config["node_id"]), None)
-        if not node:
-            raise ValueError("所选 VPNGate 节点不存在，请先刷新节点")
         config_path = CONFIG_DIR / f"exit-{safe_name(exit_id)}.ovpn"
         CONFIG_DIR.mkdir(exist_ok=True, parents=True)
-        set_vpn_exit_runtime(exit_id, "preparing", node_id=node["id"])
-        process: subprocess.Popen[str] | None = None
-        try:
-            config_path.write_text(node.get("config_text") or "", encoding="utf-8")
-            os.chmod(config_path, 0o600)
-            set_vpn_exit_runtime(exit_id, "connecting", node_id=node["id"])
-            ok, message, process = run_openvpn_until_ready(
-                str(config_path), keep_alive=True, route_nopull=True, dev=exit_config["tun_name"],
-            )
-            if not ok or process is None:
-                raise RuntimeError(message)
-            vpn_exit_processes[exit_id] = process
-            set_vpn_exit_runtime(exit_id, "tunnel_ready", node_id=node["id"], pid=process.pid)
-            setup_policy_routing(exit_config["tun_name"], exit_config["route_table"])
-            start_vpn_exit_proxy(exit_config)
-            if not wait_for_tcp_listener("127.0.0.1", exit_config["proxy_port"]):
-                raise RuntimeError("VPN 出口本地代理启动超时")
-            set_vpn_exit_runtime(
-                exit_id,
-                "proxy_ready",
-                node_id=node["id"],
-                pid=process.pid,
-                proxy_endpoint=f"127.0.0.1:{exit_config['proxy_port']}",
-            )
-            vpn_exit_retry_states.pop(exit_id, None)
-        except Exception as exc:
-            stop_process(vpn_exit_processes.pop(exit_id, process))
-            cleanup_policy_routing(exit_config["route_table"])
-            stop_vpn_exit_proxy(exit_id, exit_config["proxy_port"])
-            config_path.unlink(missing_ok=True)
-            set_vpn_exit_runtime(exit_id, "failed", node_id=node["id"], error=str(exc))
-            raise
-    return vpn_exit_status(exit_config)
+        errors: list[str] = []
+        for node in attempts:
+            node_id = str(node.get("id") or "")
+            process: subprocess.Popen[str] | None = None
+            set_vpn_exit_runtime(exit_id, "preparing", node_id=node_id, automatic=automatic)
+            try:
+                config_path.write_text(node.get("config_text") or "", encoding="utf-8")
+                os.chmod(config_path, 0o600)
+                set_vpn_exit_runtime(exit_id, "connecting", node_id=node_id, automatic=automatic)
+                ok, message, process = run_openvpn_until_ready(
+                    str(config_path), keep_alive=True, route_nopull=True, dev=exit_config["tun_name"],
+                )
+                if not ok or process is None:
+                    raise RuntimeError(message)
+                vpn_exit_processes[exit_id] = process
+                set_vpn_exit_runtime(exit_id, "tunnel_ready", node_id=node_id, pid=process.pid, automatic=automatic)
+                setup_policy_routing(exit_config["tun_name"], exit_config["route_table"])
+                start_vpn_exit_proxy(exit_config)
+                if not wait_for_tcp_listener("127.0.0.1", exit_config["proxy_port"]):
+                    raise RuntimeError("VPN 出口本地代理启动超时")
+                set_vpn_exit_runtime(
+                    exit_id,
+                    "proxy_ready",
+                    node_id=node_id,
+                    pid=process.pid,
+                    automatic=automatic,
+                    health_checked_at=0,
+                    proxy_endpoint=f"127.0.0.1:{exit_config['proxy_port']}",
+                )
+                vpn_exit_retry_states.pop(exit_id, None)
+                return vpn_exit_status(exit_config)
+            except Exception as exc:
+                errors.append(f"{node_id}: {exc}")
+                stop_process(vpn_exit_processes.pop(exit_id, process))
+                cleanup_policy_routing(exit_config["route_table"])
+                stop_vpn_exit_proxy(exit_id, exit_config["proxy_port"])
+                wait_for_tcp_listener_closed("127.0.0.1", exit_config["proxy_port"])
+                config_path.unlink(missing_ok=True)
+                set_vpn_exit_runtime(exit_id, "failed", node_id=node_id, automatic=automatic, error=str(exc))
+                if automatic:
+                    mark_vpn_exit_node_unavailable(node_id, str(exc))
+        message = "; ".join(errors) or "VPNGate 自动选点失败"
+        raise RuntimeError(message)
 
 
 def stop_vpn_exit(exit_id: str) -> dict[str, Any]:
@@ -1972,8 +2110,17 @@ def enforce_active_node_allowed_by_routing(ui_cfg: dict[str, Any], reason: str =
         clear_active_connection_state(f"{reason}，当前活动节点已不在节点列表中，已断开连接")
         return "当前活动节点已不在节点列表中，已断开连接"
 
+    auto_exit = default_vpn_exit_auto_config(ui_cfg)
     try:
-        validate_node_allowed_by_routing(active_node, ui_cfg)
+        if auto_exit:
+            if active_node not in filter_vpn_exit_candidates(
+                [active_node],
+                auto_exit,
+                require_available=False,
+            ):
+                raise RuntimeError("当前活动节点不符合默认出口的国家或 IP 类型条件")
+        else:
+            validate_node_allowed_by_routing(active_node, ui_cfg)
         return None
     except Exception as exc:
         msg = f"{reason}，当前活动节点 {active_id} 不符合新规则，已断开连接: {exc}"
@@ -1995,13 +2142,20 @@ def enforce_active_node_allowed_by_routing(ui_cfg: dict[str, Any], reason: str =
             last_check_message=msg,
         )
 
-        if ui_cfg.get("connection_enabled", True) and ui_cfg.get("routing_mode") != "fixed_ip":
+        if (
+            ui_cfg.get("connection_enabled", True)
+            and (ui_cfg.get("routing_mode") != "fixed_ip" or auto_exit)
+        ):
             threading.Thread(target=auto_switch_node, daemon=True).start()
         return msg
 
 def reconnect_fixed_node_if_needed(ui_cfg: dict[str, Any]) -> bool:
     global is_connecting
-    if ui_cfg.get("routing_mode") != "fixed_ip" or active_openvpn_running():
+    if (
+        ui_cfg.get("routing_mode") != "fixed_ip"
+        or default_vpn_exit_auto_config(ui_cfg)
+        or active_openvpn_running()
+    ):
         return False
     target_id = current_fixed_node_id(ui_cfg)
     if not target_id:
@@ -2240,8 +2394,10 @@ def auto_switch_node(attempt: int = 0) -> None:
 
     routing_mode = ui_cfg.get("routing_mode", "auto")
     target_country = ui_cfg.get("force_country", "")
+    default_exit = next((item for item in current_vpn_exits(ui_cfg) if item["id"] == "default"), None)
+    exit_auto = bool(default_exit and vpn_exit_uses_auto_selection(default_exit))
 
-    if routing_mode == "fixed_ip":
+    if routing_mode == "fixed_ip" and not exit_auto:
         print("[自动切换] 当前处于固定 IP 模式，不进行自动连接或切换。", flush=True)
         return
 
@@ -2253,7 +2409,10 @@ def auto_switch_node(attempt: int = 0) -> None:
             if n.get("probe_status") == "available" 
             and not n.get("active")
         ]
-        candidates = apply_routing_filters(candidates, ui_cfg)
+        if exit_auto and default_exit:
+            candidates = filter_vpn_exit_candidates(candidates, default_exit)
+        else:
+            candidates = apply_routing_filters(candidates, ui_cfg)
             
         candidates.sort(key=lambda n: (parse_int(n.get("latency_ms")) or 999999, -parse_int(n.get("score"))))
         
@@ -2263,7 +2422,11 @@ def auto_switch_node(attempt: int = 0) -> None:
         print(f"[自动切换] {msg}", flush=True)
         log_to_json("INFO", "VPN", msg)
         try:
-            connect_node(next_node["id"])
+            connect_node(
+                next_node["id"],
+                persist_selection=not exit_auto,
+                exit_policy=default_exit if exit_auto else None,
+            )
         except Exception as e:
             err_msg = f"切换到备用节点 {next_node['id']} 失败: {e}，将尝试下一个..."
             print(f"[自动切换] {err_msg}", flush=True)
@@ -2271,7 +2434,11 @@ def auto_switch_node(attempt: int = 0) -> None:
             auto_switch_node(attempt + 1)
     else:
         msg = "没有可用的备选节点，将自动断开并清理当前连接状态，同时在后台异步获取新节点..."
-        if routing_mode == "fixed_region" and target_country:
+        if exit_auto and default_exit:
+            exit_country = default_exit.get("country") or "所有国家"
+            exit_ip_type = default_exit.get("ip_type") or "all"
+            msg = f"没有符合出口条件的可用节点（国家: {exit_country}，IP 类型: {exit_ip_type}），将在后台持续尝试获取新节点..."
+        elif routing_mode == "fixed_region" and target_country:
             msg = f"没有可用的【{target_country}】备选节点，已断开连接，将在后台持续尝试获取新节点..."
         print(f"[自动切换] {msg}", flush=True)
         log_to_json("WARNING", "VPN", msg)
@@ -2294,7 +2461,11 @@ def auto_switch_node(attempt: int = 0) -> None:
         
         threading.Thread(target=bg_fetch_and_switch, daemon=True).start()
 
-def connect_node(node_id: str) -> str:
+def connect_node(
+    node_id: str,
+    persist_selection: bool = True,
+    exit_policy: dict[str, Any] | None = None,
+) -> str:
     global active_openvpn_process, active_openvpn_node_id, is_connecting
     node_id = str(node_id or "").strip()
     if not node_id:
@@ -2316,13 +2487,16 @@ def connect_node(node_id: str) -> str:
             raise ValueError(f"Node not found: {node_id}")
         
         ui_cfg = load_ui_config()
-        validate_node_allowed_by_routing(node, ui_cfg)
+        if exit_policy is None:
+            validate_node_allowed_by_routing(node, ui_cfg)
+        elif node not in filter_vpn_exit_candidates([node], exit_policy):
+            raise ValueError("自动选择的节点不符合该出口的国家或 IP 类型条件")
         ui_cfg["connection_enabled"] = True
         exits = current_vpn_exits(ui_cfg)
-        if exits:
+        if exits and persist_selection:
             exits[0]["node_id"] = node_id
             ui_cfg["vpn_exits"] = exits
-        if ui_cfg.get("routing_mode") == "fixed_ip":
+        if ui_cfg.get("routing_mode") == "fixed_ip" and persist_selection:
             ui_cfg["fixed_node_id"] = node_id
         update_desired_vpn_exit_state(ui_cfg, "default", "running")
         save_ui_config(ui_cfg)
@@ -2441,9 +2615,10 @@ def maintain_valid_nodes(force: bool = False) -> str:
         elif not active_openvpn_running():
             ui_cfg = load_ui_config()
             routing_mode = ui_cfg.get("routing_mode", "auto")
+            auto_exit = default_vpn_exit_auto_config(ui_cfg)
             connection_enabled = ui_cfg.get("connection_enabled", True)
             if connection_enabled:
-                if routing_mode == "fixed_ip":
+                if routing_mode == "fixed_ip" and not auto_exit:
                     reconnect_fixed_node_if_needed(ui_cfg)
                 else:
                     has_active_id = False
@@ -2526,9 +2701,10 @@ def maintain_valid_nodes(force: bool = False) -> str:
 
         initial_tested_ids: set[str] = set()
         ui_cfg = load_ui_config()
+        auto_exit = default_vpn_exit_auto_config(ui_cfg)
         should_fast_connect = (
             ui_cfg.get("connection_enabled", True)
-            and ui_cfg.get("routing_mode", "auto") != "fixed_ip"
+            and (ui_cfg.get("routing_mode", "auto") != "fixed_ip" or auto_exit)
             and not active_openvpn_running()
         )
         if should_fast_connect:
@@ -2538,7 +2714,15 @@ def maintain_valid_nodes(force: bool = False) -> str:
                     n for n in current_nodes
                     if not n.get("active") and n.get("probe_status") != "unavailable"
                 ]
-                fast_candidates = apply_routing_filters(fast_candidates, ui_cfg, include_unknown_ip_type=True)
+                fast_candidates = (
+                    filter_vpn_exit_candidates(
+                        fast_candidates,
+                        auto_exit,
+                        include_unknown_ip_type=True,
+                        require_available=False,
+                    )
+                    if auto_exit else apply_routing_filters(fast_candidates, ui_cfg, include_unknown_ip_type=True)
+                )
                 fast_candidates.sort(key=probe_priority_key)
                 fast_test_ids = [
                     n["id"] for n in fast_candidates
@@ -2559,7 +2743,10 @@ def maintain_valid_nodes(force: bool = False) -> str:
                         n for n in fast_nodes
                         if n.get("probe_status") == "available" and not n.get("active")
                     ]
-                    available_candidates = apply_routing_filters(available_candidates, ui_cfg)
+                    available_candidates = (
+                        filter_vpn_exit_candidates(available_candidates, auto_exit)
+                        if auto_exit else apply_routing_filters(available_candidates, ui_cfg)
+                    )
 
                 if available_candidates:
                     is_connecting = False
@@ -2621,10 +2808,14 @@ def maintain_valid_nodes(force: bool = False) -> str:
                 connection_enabled = ui_cfg.get("connection_enabled", True)
                 if connection_enabled:
                     routing_mode = ui_cfg.get("routing_mode", "auto")
+                    auto_exit = default_vpn_exit_auto_config(ui_cfg)
                     
-                    if routing_mode != "fixed_ip":
+                    if routing_mode != "fixed_ip" or auto_exit:
                         available_candidates = [n for n in merged if n.get("probe_status") == "available"]
-                        available_candidates = apply_routing_filters(available_candidates, ui_cfg)
+                        available_candidates = (
+                            filter_vpn_exit_candidates(available_candidates, auto_exit)
+                            if auto_exit else apply_routing_filters(available_candidates, ui_cfg)
+                        )
                         
                         if available_candidates:
                             auto_switch_node()
@@ -4450,7 +4641,7 @@ INDEX_HTML = r"""<!doctype html>
         </div>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px;"><div class="form-group" style="margin:0;"><label class="form-label" for="ve_max_ping">最大延迟（毫秒）</label><input id="ve_max_ping" type="number" class="input-field" min="0" placeholder="不限" oninput="filterVpnExitNodes()"></div><div class="form-group" style="margin:0;"><label class="form-label" for="ve_min_speed">最低速度（Mbps）</label><input id="ve_min_speed" type="number" class="input-field" min="0" placeholder="不限" oninput="filterVpnExitNodes()"></div></div>
         <div style="display:flex;gap:14px;align-items:center;flex-wrap:wrap;margin-bottom:16px;"><label class="form-label" style="display:flex;align-items:center;gap:8px;margin:0;"><input id="ve_available_only" type="checkbox" onchange="filterVpnExitNodes()"> 只显示可用节点</label><label class="form-label" style="display:flex;align-items:center;gap:8px;margin:0;">排序 <select id="ve_sort" class="input-field" style="width:auto;min-width:150px;" onchange="filterVpnExitNodes()"><option value="balanced">可用性优先</option><option value="ping">延迟最低</option><option value="speed">速度最高</option><option value="uptime">会话数最高</option></select></label></div>
-        <div class="form-group" style="margin-bottom:12px;"><label class="form-label" for="ve_node">VPNGate 节点</label><select id="ve_node" class="input-field"></select></div>
+        <div class="form-group" style="margin-bottom:12px;"><label class="form-label" for="ve_node">VPNGate 节点</label><select id="ve_node" class="input-field"></select><div style="font-size:11px;color:var(--text-secondary);margin-top:6px;line-height:1.45;">选择“自动切换”后，只保存国家和 IP 类型条件；节点失效时会在相同条件内自动重选。</div></div>
         <label class="form-label" style="display:flex;align-items:center;gap:8px;margin:0 0 16px;"><input id="ve_enabled" type="checkbox" checked> 启用此出口</label>
         <div style="display:flex;gap:8px;justify-content:flex-end;"><button type="button" class="connect-btn" onclick="addVpnExit()">新增出口</button><button type="submit" class="btn-primary" id="vpn_exit_submit_btn">保存出口配置</button></div>
       </form>
@@ -5979,7 +6170,7 @@ function filteredVpnExitNodes() {
 
 function populateVpnExitNodeSelect(nodeId) {
   const select = $("ve_node");
-  select.innerHTML = '<option value="">选择 VPNGate 节点</option>';
+  select.innerHTML = '<option value="">自动切换（按国家和 IP 类型）</option>';
   const candidates = filteredVpnExitNodes();
   for (const node of candidates) {
     const option = document.createElement("option");
@@ -6068,8 +6259,15 @@ function renderVpnExitTable() {
     name.title = exitConfig.runtime && exitConfig.runtime.error ? exitConfig.runtime.error : name.textContent;
     name.style.color = phase === "failed" ? "var(--danger)" : (["proxy_ready", "healthy"].includes(phase) ? "var(--success)" : "var(--text-primary)");
     const node = document.createElement("span");
-    const source = vpnExitNodes.find(item => item.id === exitConfig.node_id);
-    node.textContent = source ? (source.name || source.country || source.id) : (exitConfig.node_id || "未选择节点");
+    const activeNodeId = exitConfig.active_node_id || (exitConfig.runtime && exitConfig.runtime.node_id) || "";
+    const configuredSource = vpnExitNodes.find(item => item.id === exitConfig.node_id);
+    const activeSource = vpnExitNodes.find(item => item.id === activeNodeId);
+    if (!exitConfig.node_id) {
+      const activeLabel = activeSource ? (activeSource.name || activeSource.country || activeSource.id) : activeNodeId;
+      node.textContent = activeLabel ? `自动 · 当前 ${activeLabel}` : "自动切换";
+    } else {
+      node.textContent = configuredSource ? (configuredSource.name || configuredSource.country || configuredSource.id) : exitConfig.node_id;
+    }
     node.style.cssText = "overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-secondary);";
     const port = document.createElement("span");
     port.textContent = `127.0.0.1:${exitConfig.proxy_port}`;
@@ -7134,30 +7332,36 @@ function exportLogContent() {
 </script>
 </body></html>"""
 
-def check_proxy_health() -> dict[str, Any]:
+def check_proxy_health(
+    proxy_port: int | None = None,
+    proxy_host: str | None = None,
+    tun_name: str = "tun0",
+) -> dict[str, Any]:
+    proxy_port = proxy_port or LOCAL_PROXY_PORT
+    proxy_host = proxy_host or LOCAL_PROXY_HOST
     # 1. 检测代理服务端口是否在监听
-    is_ipv6 = ":" in LOCAL_PROXY_HOST
+    is_ipv6 = ":" in proxy_host
     af = socket.AF_INET6 if is_ipv6 else socket.AF_INET
     s = None
     try:
         s = socket.socket(af, socket.SOCK_STREAM)
         s.settimeout(1.5)
-        connect_host = LOCAL_PROXY_HOST
+        connect_host = proxy_host
         if connect_host in ("::", "0.0.0.0", ""):
             connect_host = "::1" if is_ipv6 else "127.0.0.1"
         try:
-            s.connect((connect_host, LOCAL_PROXY_PORT))
+            s.connect((connect_host, proxy_port))
         except Exception as e:
             if connect_host == "::1":
                 s.close()
                 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 s.settimeout(1.5)
-                s.connect(("127.0.0.1", LOCAL_PROXY_PORT))
+                s.connect(("127.0.0.1", proxy_port))
             else:
                 raise e
     except Exception as e:
-        diag = vpn_utils.diagnose_local_obstructions(LOCAL_PROXY_PORT, host=LOCAL_PROXY_HOST)
-        diag_msg = diag[1] if diag else f"端口 {LOCAL_PROXY_PORT} 连接失败，原因: {e}"
+        diag = vpn_utils.diagnose_local_obstructions(proxy_port, host=proxy_host)
+        diag_msg = diag[1] if diag else f"端口 {proxy_port} 连接失败，原因: {e}"
         return {
             "ok": False,
             "error": f"代理服务未运行 ({diag_msg})"
@@ -7170,27 +7374,27 @@ def check_proxy_health() -> dict[str, Any]:
                 pass
 
     # 2. 检测虚拟网卡 tun0 是否存在 (Linux 下)
-    tun_path = Path("/sys/class/net/tun0")
+    tun_path = Path("/sys/class/net") / tun_name
     if sys.platform.startswith("linux") and not tun_path.exists():
         return {
             "ok": False,
-            "error": "[错误代码 3004] [ERR_ROUTE_DEV_NOT_FOUND] VPN 虚拟网卡 (tun0) 未启用，请确保当前已成功连接 VPN 节点"
+            "error": f"[错误代码 3004] [ERR_ROUTE_DEV_NOT_FOUND] VPN 虚拟网卡 ({tun_name}) 未启用，请确保当前已成功连接 VPN 节点"
         }
 
     # 3. 使用 curl 通过本地 SOCKS5 代理接口测试 IP 与实际延迟
     def _curl_check_ip(url: str) -> dict[str, Any] | None:
         proxy_hosts = []
-        if LOCAL_PROXY_HOST == "::":
+        if proxy_host == "::":
             proxy_hosts = ["[::1]", "127.0.0.1"]
-        elif LOCAL_PROXY_HOST == "0.0.0.0":
+        elif proxy_host == "0.0.0.0":
             proxy_hosts = ["127.0.0.1"]
-        elif ":" in LOCAL_PROXY_HOST:
-            proxy_hosts = [f"[{LOCAL_PROXY_HOST}]", "127.0.0.1"]
+        elif ":" in proxy_host:
+            proxy_hosts = [f"[{proxy_host}]", "127.0.0.1"]
         else:
-            proxy_hosts = [LOCAL_PROXY_HOST]
+            proxy_hosts = [proxy_host]
 
         for p_host in proxy_hosts:
-            proxy_url = f"socks5h://{p_host}:{LOCAL_PROXY_PORT}"
+            proxy_url = f"socks5h://{p_host}:{proxy_port}"
             proxy_user, proxy_pass = proxy_server.get_proxy_credentials()
             cmd = [
                 "curl", "-s",
@@ -7231,18 +7435,18 @@ def check_proxy_health() -> dict[str, Any]:
         try:
             test_sock = socket.socket(af, socket.SOCK_STREAM)
             test_sock.settimeout(1.0)
-            connect_host = LOCAL_PROXY_HOST
+            connect_host = proxy_host
             if connect_host in ("::", "0.0.0.0", ""):
                 connect_host = "::1" if is_ipv6 else "127.0.0.1"
             try:
-                test_sock.connect((connect_host, LOCAL_PROXY_PORT))
+                test_sock.connect((connect_host, proxy_port))
                 port_still_listening = True
             except Exception:
                 if connect_host == "::1":
                     test_sock.close()
                     test_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                     test_sock.settimeout(1.0)
-                    test_sock.connect(("127.0.0.1", LOCAL_PROXY_PORT))
+                    test_sock.connect(("127.0.0.1", proxy_port))
                     port_still_listening = True
         except Exception:
             pass
@@ -7254,7 +7458,7 @@ def check_proxy_health() -> dict[str, Any]:
                     pass
 
         if not port_still_listening:
-            diag = vpn_utils.diagnose_local_obstructions(LOCAL_PROXY_PORT, host=LOCAL_PROXY_HOST)
+            diag = vpn_utils.diagnose_local_obstructions(proxy_port, host=proxy_host)
             if diag:
                 return {"ok": False, "error": f"出口连接测试失败 | 本机诊断结果: {diag[1]}"}
             
@@ -7801,13 +8005,15 @@ class Handler(BaseHTTPRequestHandler):
                         raise ValueError("该 VPN 出口仍被 sing-box 节点使用，请先切换协议节点出口")
                     if old_exit["proxy_port"] != new_exit["proxy_port"]:
                         raise ValueError("该 VPN 出口仍被 sing-box 节点使用，不能修改本地端口")
+                restart_default = False
                 for exit_id, old_exit in old_exits.items():
-                    if exit_id == "default" or not vpn_exit_status(old_exit)["running"]:
+                    if not vpn_exit_status(old_exit)["running"]:
                         continue
                     new_exit = new_exits.get(exit_id)
-                    fields = ("node_id", "proxy_port", "tun_name", "route_table", "enabled")
+                    fields = ("node_id", "country", "ip_type", "proxy_port", "tun_name", "route_table", "enabled")
                     if new_exit is None or any(old_exit[field] != new_exit[field] for field in fields):
                         stop_vpn_exit(exit_id)
+                        restart_default = restart_default or exit_id == "default"
                 ui_cfg["vpn_exits"] = normalized
                 previous_desired = ui_cfg.get("desired_state", {}).get("vpn_exits", {})
                 if not isinstance(previous_desired, dict):
@@ -7821,9 +8027,17 @@ class Handler(BaseHTTPRequestHandler):
                 }
                 ui_cfg.setdefault("desired_state", {})["vpn_exits"] = desired_exits
                 save_ui_config(ui_cfg)
+                message = "VPN 出口配置已保存"
+                if restart_default and desired_exits.get("default") == "running":
+                    try:
+                        start_vpn_exit("default")
+                        message += "，默认出口已按新策略重新连接"
+                    except Exception as exc:
+                        log_to_json("WARNING", "VPN", f"默认出口按新策略重连失败，将由后台继续重试: {exc}")
+                        message += "；当前暂无符合条件的可用节点，后台将继续重试"
                 self.send_json({
                     "ok": True,
-                    "message": "VPN 出口配置已保存",
+                    "message": message,
                     "exits": [vpn_exit_status(item) for item in current_vpn_exits(ui_cfg)],
                 })
             except ValueError as exc:

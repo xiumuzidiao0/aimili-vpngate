@@ -163,6 +163,33 @@ class RuntimeReconciliationTests(unittest.TestCase):
         self.assertFalse(ui_config["connection_enabled"])
         self.assertEqual(ui_config["desired_state"]["vpn_exits"]["default"], "stopped")
 
+    def test_auto_default_exit_takes_precedence_over_legacy_fixed_ip_rule(self):
+        ui_config = {
+            "routing_mode": "fixed_ip",
+            "fixed_node_id": "us-fixed",
+            "vpn_exits": [{
+                "id": "default",
+                "node_id": "",
+                "country": "日本",
+                "ip_type": "residential",
+                "proxy_port": 7928,
+                "enabled": True,
+            }],
+        }
+        active_node = {
+            "id": "jp-auto",
+            "country": "日本",
+            "ip_type": "mobile",
+            "probe_status": "unavailable",
+        }
+        with patch.object(vpngate_manager, "active_openvpn_node_id", "jp-auto"), \
+             patch.object(vpngate_manager, "read_nodes", return_value=[active_node]), \
+             patch.object(vpngate_manager, "validate_node_allowed_by_routing") as validate_routing:
+            result = vpngate_manager.enforce_active_node_allowed_by_routing(ui_config)
+
+        self.assertIsNone(result)
+        validate_routing.assert_not_called()
+
     def test_reconcile_restores_extra_exits_and_isolates_failures(self):
         exits = [
             {"id": "default", "enabled": True},
@@ -230,6 +257,41 @@ class RuntimeReconciliationTests(unittest.TestCase):
         self.assertEqual(first["vpn_exits"]["usa"]["retry_at"], 130)
         self.assertEqual(second["vpn_exits"]["usa"]["retry_at"], 130)
         self.assertEqual(vpngate_manager.vpn_exit_retry_states["usa"]["failures"], 1)
+
+    def test_reconcile_auto_exit_reselects_after_health_failure(self):
+        exit_config = {
+            "id": "japan",
+            "enabled": True,
+            "node_id": "",
+            "country": "日本",
+            "ip_type": "residential",
+            "proxy_port": 7929,
+            "tun_name": "tun1",
+        }
+        ui_config = {"desired_state": {"singbox": "stopped", "vpn_exits": {"japan": "running"}}}
+        running_status = {
+            "running": True,
+            "active_node_id": "jp-old",
+            "runtime": {"node_id": "jp-old", "health_checked_at": 0},
+        }
+        with patch.object(singbox_manager, "status", return_value={"running": False}), \
+             patch.object(vpngate_manager, "current_vpn_exits", return_value=[exit_config]), \
+             patch.object(vpngate_manager, "vpn_exit_status", return_value=running_status), \
+             patch.object(
+                 vpngate_manager,
+                 "check_proxy_health",
+                 return_value={"ok": False, "error": "egress unavailable"},
+             ) as check_health, \
+             patch.object(vpngate_manager, "mark_vpn_exit_node_unavailable") as mark_unavailable, \
+             patch.object(vpngate_manager, "stop_vpn_exit", return_value={"running": False}) as stop_exit, \
+             patch.object(vpngate_manager, "start_vpn_exit", return_value={"running": True}) as start_exit:
+            result = vpngate_manager.reconcile_declared_runtime(ui_config, now=100)
+
+        check_health.assert_called_once_with(proxy_port=7929, proxy_host="127.0.0.1", tun_name="tun1")
+        mark_unavailable.assert_called_once_with("jp-old", "egress unavailable")
+        stop_exit.assert_called_once_with("japan")
+        start_exit.assert_called_once_with("japan")
+        self.assertTrue(result["vpn_exits"]["japan"]["ok"])
 
     def test_singbox_status_degrades_when_exit_process_is_running_but_proxy_is_not_ready(self):
         ui_config = {

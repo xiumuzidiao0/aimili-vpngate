@@ -250,6 +250,74 @@ class SingBoxManagerTests(unittest.TestCase):
 
 
 class VpnExitTests(unittest.TestCase):
+    def test_auto_exit_filters_country_and_ip_type_by_latency(self):
+        exit_config = {"node_id": "", "country": "日本", "ip_type": "residential"}
+        nodes = [
+            {"id": "jp-slow", "country": "日本", "ip_type": "mobile", "probe_status": "available", "latency_ms": 80, "score": 100},
+            {"id": "us-fast", "country": "美国", "ip_type": "residential", "probe_status": "available", "latency_ms": 10, "score": 200},
+            {"id": "jp-hosting", "country": "日本", "ip_type": "hosting", "probe_status": "available", "latency_ms": 5, "score": 300},
+            {"id": "jp-fast", "country": "日本", "ip_type": "residential", "probe_status": "available", "latency_ms": 20, "score": 90},
+        ]
+
+        candidates = vpngate_manager.filter_vpn_exit_candidates(nodes, exit_config)
+
+        self.assertEqual([node["id"] for node in candidates], ["jp-fast", "jp-slow"])
+
+    def test_auto_extra_exit_fails_over_to_next_matching_node(self):
+        exit_config = {
+            "id": "japan",
+            "enabled": True,
+            "node_id": "",
+            "country": "日本",
+            "ip_type": "all",
+            "tun_name": "tun1",
+            "route_table": 101,
+            "proxy_port": 7929,
+        }
+        nodes = [
+            {"id": "jp-first", "country": "日本", "ip_type": "hosting", "probe_status": "available", "latency_ms": 10, "config_text": "first"},
+            {"id": "jp-second", "country": "日本", "ip_type": "hosting", "probe_status": "available", "latency_ms": 20, "config_text": "second"},
+        ]
+        process = MagicMock(pid=4321)
+        process.poll.return_value = None
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(vpngate_manager, "CONFIG_DIR", Path(directory)), \
+             patch.object(vpngate_manager, "current_vpn_exits", return_value=[exit_config]), \
+             patch.object(vpngate_manager, "read_nodes", return_value=nodes), \
+             patch.object(vpngate_manager, "run_openvpn_until_ready", side_effect=[(False, "first failed", None), (True, "ready", process)]) as run_openvpn, \
+             patch.object(vpngate_manager, "setup_policy_routing"), \
+             patch.object(vpngate_manager, "cleanup_policy_routing"), \
+             patch.object(vpngate_manager, "start_vpn_exit_proxy"), \
+             patch.object(vpngate_manager, "stop_vpn_exit_proxy"), \
+             patch.object(vpngate_manager, "wait_for_tcp_listener", return_value=True), \
+             patch.object(vpngate_manager, "mark_vpn_exit_node_unavailable") as mark_unavailable:
+            vpngate_manager.vpn_exit_processes.clear()
+            vpngate_manager.vpn_exit_runtime_states.clear()
+            status = vpngate_manager.start_vpn_exit("japan")
+
+        self.assertEqual(run_openvpn.call_count, 2)
+        mark_unavailable.assert_called_once_with("jp-first", "first failed")
+        self.assertTrue(status["running"])
+        self.assertEqual(status["active_node_id"], "jp-second")
+        self.assertTrue(status["runtime"]["automatic"])
+        vpngate_manager.vpn_exit_processes.clear()
+
+    def test_auto_default_exit_does_not_persist_runtime_node(self):
+        exit_config = {
+            "id": "default", "enabled": True, "node_id": "", "country": "日本", "ip_type": "all",
+            "tun_name": "tun0", "route_table": 100, "proxy_port": 7928,
+        }
+        node = {"id": "jp-auto", "country": "日本", "ip_type": "hosting", "probe_status": "available", "latency_ms": 10}
+        with patch.object(vpngate_manager, "current_vpn_exits", return_value=[exit_config]), \
+             patch.object(vpngate_manager, "read_nodes", return_value=[node]), \
+             patch.object(vpngate_manager, "connect_node", return_value="connected") as connect:
+            vpngate_manager.vpn_exit_runtime_states.clear()
+            status = vpngate_manager.start_vpn_exit("default")
+
+        connect.assert_called_once_with("jp-auto", persist_selection=False, exit_policy=exit_config)
+        self.assertEqual(exit_config["node_id"], "")
+        self.assertEqual(status["runtime"]["node_id"], "jp-auto")
+
     def test_normalize_exits_and_bind_singbox_nodes(self):
         ui_config = {"proxy_port": 7928, "port": 8787, "singbox": {"nodes": []}}
         raw_exits = [

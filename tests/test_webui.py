@@ -33,6 +33,7 @@ class WebUiContractTests(unittest.TestCase):
         self.assertIn('id="ve_available_only"', html)
         self.assertIn('id="ve_max_ping"', html)
         self.assertIn('id="ve_min_speed"', html)
+        self.assertIn("自动切换（按国家和 IP 类型）", html)
 
     def test_mobile_node_list_uses_object_cards(self):
         html = vpngate_manager.INDEX_HTML

@@ -71,7 +71,7 @@ tmp=$(mktemp) && curl -LfsS --retry 5 --retry-delay 2 --connect-timeout 15 -o "$
 VLESS-REALITY 客户端 -> sing-box -> 127.0.0.1:7928 -> OpenVPN tun0 -> VPNGate 节点
 ```
 
-在“VPNGate 出口”中可按国家、IP 类型、延迟、速度和可用性筛选节点并增加独立出口，例如 `127.0.0.1:7929 -> tun1 -> VPNGate 美国节点`。然后在“节点组合”中逐个或批量绑定出口，并在应用前预览变更。因此客户端 A 和 B 可以分别使用不同 VPNGate 国家出口，但不会形成 VPN 到 VPN 的串联。所有 `7928/7929` 类端口均只监听本机回环地址，不需要也不应在防火墙或安全组中对公网放行；只放行 Web UI 端口和 sing-box 公网入口端口。
+在“VPNGate 出口”中可按国家、IP 类型、延迟、速度和可用性筛选节点并增加独立出口，例如 `127.0.0.1:7929 -> tun1 -> VPNGate 美国节点`。节点下拉框选择“自动切换（按国家和 IP 类型）”时，无需固定具体 VPNGate 节点；配置只保存国家和 IP 类型条件，启动时自动选择当前最佳可用节点，出口失效后也会在相同条件内重新选择。然后在“节点组合”中逐个或批量绑定出口，并在应用前预览变更。因此客户端 A 和 B 可以分别使用不同 VPNGate 国家出口，但不会形成 VPN 到 VPN 的串联。所有 `7928/7929` 类端口均只监听本机回环地址，不需要也不应在防火墙或安全组中对公网放行；只放行 Web UI 端口和 sing-box 公网入口端口。
 
 * **🐍 Python 脚本中使用代理**:
   ```python
@@ -214,7 +214,7 @@ The Web UI can add, edit, delete, and enable multiple protocol nodes at the same
 VLESS-REALITY client -> sing-box -> 127.0.0.1:7928 -> OpenVPN tun0 -> VPNGate node
 ```
 
-Under `Admin -> VPN Exits`, add an independent exit such as `127.0.0.1:7929 -> tun1 -> VPNGate US node`, then select that exit from a sing-box node. This lets client A and client B use different VPNGate countries without creating a VPN-to-VPN chain. Ports such as `7928` and `7929` are loopback-only internal hops and must not be opened publicly; only expose the Web UI port and public sing-box inbound ports.
+Under `Admin -> VPN Exits`, add an independent exit such as `127.0.0.1:7929 -> tun1 -> VPNGate US node`, then select that exit from a sing-box node. Select `Auto switch (country and IP type)` instead of a fixed VPNGate node to save only the country and IP-type policy; the service picks the best available matching node at startup and reselects within the same policy after an egress failure. This lets client A and client B use different VPNGate countries without creating a VPN-to-VPN chain. Ports such as `7928` and `7929` are loopback-only internal hops and must not be opened publicly; only expose the Web UI port and public sing-box inbound ports.
 
 * **🐍 Proxy in Python**:
   ```python
