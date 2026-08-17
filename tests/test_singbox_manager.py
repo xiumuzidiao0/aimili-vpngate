@@ -197,6 +197,16 @@ class SingBoxManagerTests(unittest.TestCase):
         self.assertEqual(config["route"]["final"], "block")
         self.assertEqual(config["outbounds"], [{"type": "block", "tag": "block"}])
 
+    def test_node_names_must_be_unique_case_insensitively(self):
+        first = singbox_manager.new_node(7928, "vless")
+        second = singbox_manager.new_node(7928, "trojan")
+        first["name"] = "办公入口"
+        second["name"] = "办公入口"
+        second["port"] = 4434
+
+        with self.assertRaisesRegex(singbox_manager.SingBoxError, "名称重复"):
+            singbox_manager.normalize_nodes([first, second], 7928, {8787, 7928})
+
     def test_real_singbox_check_for_generated_chain_when_binary_is_configured(self):
         binary = os.environ.get("SINGBOX_TEST_BIN")
         if not binary or not os.path.isfile(binary):

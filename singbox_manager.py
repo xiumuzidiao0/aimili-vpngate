@@ -527,6 +527,7 @@ def normalize_nodes(
     nodes: list[dict[str, Any]] = []
     used_ports = set(forbidden_ports)
     node_ids: set[str] = set()
+    node_names: set[str] = set()
     for raw in raw_nodes:
         if not isinstance(raw, dict):
             raise SingBoxError("协议节点格式无效")
@@ -538,8 +539,12 @@ def normalize_nodes(
         normalized["name"] = str(raw.get("name") or PROTOCOL_LABELS[normalized["protocol"]]).strip()[:80]
         if not normalized["name"]:
             normalized["name"] = PROTOCOL_LABELS[normalized["protocol"]]
+        name_key = normalized["name"].casefold()
+        if name_key in node_names:
+            raise SingBoxError(f"协议节点名称重复：{normalized['name']}，请使用不同名称")
         nodes.append(normalized)
         node_ids.add(node_id)
+        node_names.add(name_key)
         used_ports.add(normalized["port"])
     return nodes
 

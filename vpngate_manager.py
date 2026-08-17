@@ -3815,6 +3815,71 @@ INDEX_HTML = r"""<!doctype html>
       border-color: var(--primary);
       box-shadow: 0 0 12px rgba(99, 102, 241, 0.15);
     }
+
+    .overview-strip {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 10px;
+      margin-bottom: 18px;
+    }
+    .overview-item {
+      min-width: 0;
+      padding: 12px 14px;
+      background: rgba(22, 30, 49, 0.72);
+      border: 1px solid var(--border-color);
+      border-radius: 10px;
+    }
+    .overview-label {
+      color: var(--text-secondary);
+      font-size: 11px;
+      margin-bottom: 5px;
+    }
+    .overview-value {
+      color: var(--text-primary);
+      font-size: 14px;
+      font-weight: 700;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .overview-value[data-state="healthy"] { color: var(--success); }
+    .overview-value[data-state="degraded"] { color: var(--warning); }
+    .overview-value[data-state="stopped"], .overview-value[data-state="error"] { color: var(--danger); }
+    .ui-toast {
+      position: fixed;
+      right: 18px;
+      bottom: 18px;
+      z-index: 12000;
+      max-width: min(420px, calc(100vw - 36px));
+      padding: 11px 14px;
+      border: 1px solid var(--border-color);
+      border-radius: 8px;
+      background: rgba(22, 30, 49, 0.96);
+      color: var(--text-primary);
+      box-shadow: 0 12px 28px rgba(0,0,0,.35);
+      font-size: 13px;
+      opacity: 0;
+      transform: translateY(8px);
+      pointer-events: none;
+      transition: opacity .18s ease, transform .18s ease;
+    }
+    .ui-toast.show { opacity: 1; transform: translateY(0); }
+    .ui-toast.success { border-color: rgba(16,185,129,.45); }
+    .ui-toast.error { border-color: rgba(244,63,94,.55); color: #fecdd3; }
+    .ui-toast.warning { border-color: rgba(245,158,11,.55); color: #fde68a; }
+    .copy-btn { white-space: nowrap; }
+
+    @media (max-width: 760px) {
+      .overview-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .modal-content { width: calc(100% - 20px) !important; max-height: 92vh !important; padding: 20px !important; border-radius: 14px; }
+      #sb_node_table > div, #vpn_exit_table > div, #singbox_combinations_table > div { grid-template-columns: minmax(0, 1fr) !important; gap: 7px !important; }
+      #sb_node_table > div > span:last-child, #vpn_exit_table > div > span:last-child { justify-content: flex-start !important; }
+      #sb_node_links > div { grid-template-columns: minmax(0, 1fr) !important; }
+      #sb_node_links input { min-width: 0; }
+    }
+    @media (max-width: 420px) {
+      .overview-strip { grid-template-columns: 1fr; }
+    }
     
     .option-card-title {
       font-size: 13px;
@@ -3904,6 +3969,13 @@ INDEX_HTML = r"""<!doctype html>
   </div>
 </header>
 <main>
+  <section class="overview-strip" id="overview_strip" aria-live="polite">
+    <div class="overview-item"><div class="overview-label">sing-box</div><div class="overview-value" id="overview_singbox">读取中...</div></div>
+    <div class="overview-item"><div class="overview-label">代理链</div><div class="overview-value" id="overview_chain">读取中...</div></div>
+    <div class="overview-item"><div class="overview-label">VPNGate 出口</div><div class="overview-value" id="overview_exits">读取中...</div></div>
+    <div class="overview-item"><div class="overview-label">数据更新时间</div><div class="overview-value" id="overview_updated">读取中...</div></div>
+  </section>
+  <div id="ui_toast" class="ui-toast" role="status" aria-live="polite"></div>
   
     <!-- 当前连接活动节点卡片 -->
     <section class="active-node-section" id="active_node_card" style="margin-bottom: 24px;">
@@ -4215,7 +4287,7 @@ INDEX_HTML = r"""<!doctype html>
   <div id="singbox_combinations_modal" class="modal">
     <div class="modal-content" style="max-width:760px;width:94%;max-height:88vh;overflow-y:auto;">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:18px;">
-        <div><h3 style="margin:0;font-size:18px;color:var(--text-primary);">节点组合</h3><div style="font-size:12px;color:var(--text-secondary);margin-top:5px;">把 sing-box 节点绑定到主机网络或指定 VPNGate 出口。</div></div>
+        <div><h3 style="margin:0;font-size:18px;color:var(--text-primary);">节点组合</h3><div style="font-size:12px;color:var(--text-secondary);margin-top:5px;">把 sing-box 节点绑定到主机网络或指定 VPNGate 出口。</div><div id="singbox_combinations_dirty" style="display:none;color:var(--warning);font-size:12px;margin-top:5px;">有未应用变更</div></div>
         <button type="button" onclick="closeSingboxCombinationsModal()" title="关闭" style="background:transparent;border:none;padding:4px;cursor:pointer;color:var(--text-secondary);width:28px;height:28px;">&#10005;</button>
       </div>
       <div id="singbox_combinations_error" style="color:var(--danger);font-size:13px;margin-bottom:12px;padding:8px 12px;background:rgba(244,63,94,0.1);border:1px solid rgba(244,63,94,0.2);border-radius:6px;display:none;"></div>
@@ -4388,6 +4460,51 @@ const esc=s=>String(s||"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&
 const base=p=>(p||"").split(/[\\/]/).pop();
 function time(ts){return ts?new Date(ts*1000).toLocaleString():"从未"}
 function speed(v){return v?`${(v*8/1000/1000).toFixed(1)} Mbps`:"-"}
+
+let toastTimer = null;
+async function apiFetch(path, options = {}) {
+  const response = await fetch(path, { credentials: "same-origin", ...options });
+  let data = null;
+  try { data = await response.json(); } catch (_) {}
+  if (!response.ok || (data && data.ok === false)) {
+    const error = new Error((data && data.error) || `请求失败（${response.status}）`);
+    error.status = response.status;
+    error.data = data;
+    throw error;
+  }
+  return data || {};
+}
+
+function showToast(message, type = "success", duration = 3200) {
+  const toast = $("ui_toast");
+  if (!toast || !message) return;
+  toast.className = `ui-toast ${type} show`;
+  toast.textContent = message;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { toast.classList.remove("show"); }, duration);
+}
+
+function setOverviewValue(id, value, stateName = "") {
+  const element = $(id);
+  if (!element) return;
+  element.textContent = value;
+  element.dataset.state = stateName;
+}
+
+function renderOverview(singbox, exits) {
+  if (singbox) {
+    setOverviewValue("overview_singbox", singbox.installed ? (singbox.running ? "运行中" : "已停止") : "未安装", singbox.installed && singbox.running ? "healthy" : "stopped");
+    const chainState = singbox.chain_state || (singbox.chain_ready ? "healthy" : "degraded");
+    const chainText = singbox.chain_ready ? "健康" : (singbox.chain_error || "降级");
+    setOverviewValue("overview_chain", chainText, chainState);
+  }
+  if (Array.isArray(exits)) {
+    const ready = exits.filter(item => item.running && ["proxy_ready", "healthy"].includes(item.phase)).length;
+    const active = exits.filter(item => item.running).length;
+    setOverviewValue("overview_exits", `${ready} 健康 / ${active} 运行中 / ${exits.length} 个`, ready === exits.length && exits.length ? "healthy" : (active ? "degraded" : "stopped"));
+  }
+  setOverviewValue("overview_updated", new Date().toLocaleTimeString());
+}
 
 const translateQuality = q => {
   const dict = {"normal": "普通", "proxy": "代理", "datacenter": "数据中心", "mobile": "移动端"};
@@ -4952,10 +5069,28 @@ async function disconnectNode(){
 
 
 async function load(){
-  const r=await fetch("./api/nodes"); 
-  const d=await r.json(); 
-  nodes=Array.isArray(d.nodes) ? d.nodes : []; 
-  state=d.state||{}; 
+  try {
+    const [nodeData, singboxResult, exitsResult] = await Promise.allSettled([
+      apiFetch("./api/nodes"),
+      apiFetch("./api/singbox/status"),
+      apiFetch("./api/vpn-exits")
+    ]);
+    if (nodeData.status !== "fulfilled") throw nodeData.reason;
+    const d = nodeData.value;
+    nodes=Array.isArray(d.nodes) ? d.nodes : [];
+    state=d.state||{};
+    renderOverview(
+      singboxResult.status === "fulfilled" ? singboxResult.value.data : null,
+      exitsResult.status === "fulfilled" ? exitsResult.value.exits : null,
+    );
+    if (singboxResult.status === "rejected" || exitsResult.status === "rejected") {
+      showToast("部分管理状态暂时无法读取，列表数据仍可用。", "warning", 5000);
+    }
+  } catch (err) {
+    showToast(err.message || "读取节点数据失败", "error", 5000);
+    setOverviewValue("overview_updated", "读取失败", "error");
+    return;
+  }
   
   stableSortNodes();
   updateCountryFilter();
@@ -4974,11 +5109,13 @@ $("status_filter").onchange=()=>{ currentPage = 1; render(); };
 $("refresh").onclick=async()=>{
   refreshButtonBusy("正在启动更新...");
   try{
-    await fetch("./api/refresh_nodes",{method:"POST"});
+    await apiFetch("./api/refresh_nodes",{method:"POST"});
+    showToast("已启动节点更新，结果会实时显示。", "success", 4500);
     await load();
     startRefreshPolling();
   }
   catch(e){
+    showToast(e.message || "启动节点更新失败", "error");
     refreshButtonIdle();
   }
 };
@@ -5453,6 +5590,8 @@ let selectedSingboxNodeId = "";
 let vpnExits = [];
 let vpnExitNodes = [];
 let selectedVpnExitId = "default";
+let combinationDirty = false;
+let singboxRuntime = {};
 
 function setVpnExitMessage(type, message) {
   const errorEl = $("vpn_exits_error");
@@ -5603,6 +5742,13 @@ function addVpnExit() {
 function deleteVpnExit(exitId) {
   const exitConfig = vpnExits.find(item => item.id === exitId);
   if (!exitConfig || exitId === "default") return;
+  const references = singboxNodes.filter(node => node.vpn_exit_id === exitId).length;
+  if (references) {
+    setVpnExitMessage("error", `该出口仍被 ${references} 个 sing-box 节点使用，请先在“节点组合”中切换为 direct。`);
+    showToast("请先解除节点组合，再删除出口。", "warning");
+    return;
+  }
+  if (!confirm(`确定删除出口“${exitConfig.name || exitId}”吗？`)) return;
   vpnExits = vpnExits.filter(item => item.id !== exitId);
   selectedVpnExitId = "default";
   fillVpnExitForm(selectedVpnExit());
@@ -5618,13 +5764,12 @@ async function saveVpnExits(event) {
   const submit = $("vpn_exit_submit_btn");
   submit.disabled = true;
   try {
-    const res = await fetch("./api/vpn-exits/config", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ exits: vpnExits }) });
-    const data = await res.json();
-    if (!res.ok || !data.ok) throw new Error(data.error || "保存 VPN 出口配置失败");
+    const data = await apiFetch("./api/vpn-exits/config", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ exits: vpnExits }) });
     vpnExits = data.exits || vpnExits;
     fillVpnExitForm(selectedVpnExit());
     renderVpnExitTable();
     setVpnExitMessage("success", data.message || "VPN 出口配置已保存");
+    showToast("VPNGate 出口配置已保存");
   } catch (err) {
     setVpnExitMessage("error", err.message || "保存 VPN 出口配置失败");
   } finally {
@@ -5634,16 +5779,16 @@ async function saveVpnExits(event) {
 
 async function vpnExitAction(id, action) {
   setVpnExitMessage("", "");
+  const exitConfig = vpnExits.find(item => item.id === id);
+  if (action === "stop" && exitConfig && !confirm(`确定停止出口“${exitConfig.name || id}”吗？绑定该出口的客户端链路会暂时降级。`)) return;
   try {
-    const res = await fetch("./api/vpn-exits/action", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id, action }) });
-    const data = await res.json();
-    if (!res.ok || !data.ok) throw new Error(data.error || "VPN 出口操作失败");
-    const statusRes = await fetch("./api/vpn-exits");
-    const statusData = await statusRes.json();
-    if (statusRes.ok && statusData.ok) vpnExits = statusData.exits || vpnExits;
+    const data = await apiFetch("./api/vpn-exits/action", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id, action }) });
+    const statusData = await apiFetch("./api/vpn-exits");
+    vpnExits = statusData.exits || vpnExits;
     fillVpnExitForm(selectedVpnExit());
     renderVpnExitTable();
     setVpnExitMessage("success", data.message || "VPN 出口操作成功");
+    showToast(data.message || "VPN 出口操作成功");
     await load();
   } catch (err) {
     setVpnExitMessage("error", err.message || "VPN 出口操作失败");
@@ -5655,9 +5800,7 @@ async function openVpnExitsModal() {
   $("vpn_exits_modal").style.display = "flex";
   $("admin_dropdown").style.display = "none";
   try {
-    const res = await fetch("./api/vpn-exits");
-    const data = await res.json();
-    if (!res.ok || !data.ok) throw new Error(data.error || "读取 VPN 出口失败");
+    const data = await apiFetch("./api/vpn-exits");
     vpnExits = data.exits || [];
     vpnExitNodes = data.nodes || [];
     selectedVpnExitId = vpnExits.some(item => item.id === selectedVpnExitId) ? selectedVpnExitId : "default";
@@ -5702,7 +5845,13 @@ function renderSingboxCombinations() {
     const detail = document.createElement("div");
     detail.textContent = `${node.protocol || "协议"} :${node.port || ""}`;
     detail.style.cssText = "color:var(--text-secondary);font-size:12px;margin-top:3px;";
-    title.append(name, detail);
+    const runtimeNode = Array.isArray(singboxRuntime.nodes) ? singboxRuntime.nodes.find(item => item.id === node.id) : null;
+    const runtimeState = runtimeNode && runtimeNode.chain_state ? runtimeNode.chain_state : (node.enabled && node.chain_enabled ? "unknown" : "disabled");
+    const stateLabels = { healthy: "健康", degraded: "降级", disabled: "已禁用", unknown: "未检测" };
+    const stateLine = document.createElement("div");
+    stateLine.textContent = `${stateLabels[runtimeState] || runtimeState}${runtimeNode && runtimeNode.chain_error ? `：${runtimeNode.chain_error}` : ""}`;
+    stateLine.style.cssText = `font-size:11px;margin-top:3px;color:${runtimeState === "healthy" ? "var(--success)" : (runtimeState === "degraded" ? "var(--warning)" : "var(--text-secondary)")};`;
+    title.append(name, detail, stateLine);
     const select = document.createElement("select");
     select.className = "input-field";
     select.dataset.nodeId = node.id;
@@ -5718,6 +5867,10 @@ function renderSingboxCombinations() {
     }
     select.value = node.vpn_exit_id || "direct";
     if (!Array.from(select.options).some(option => option.value === select.value)) select.value = "direct";
+    select.onchange = () => {
+      combinationDirty = true;
+      $("singbox_combinations_dirty").style.display = "block";
+    };
     row.append(title, select);
     table.appendChild(row);
   }
@@ -5728,11 +5881,15 @@ function renderSingboxCombinations() {
 
 async function refreshSingboxCombinations() {
   try {
-    const res = await fetch("./api/singbox/combinations");
-    const data = await res.json();
-    if (!res.ok || !data.ok) throw new Error(data.error || "读取节点组合失败");
+    const [data, statusData] = await Promise.all([
+      apiFetch("./api/singbox/combinations"),
+      apiFetch("./api/singbox/status"),
+    ]);
     singboxNodes = data.nodes || [];
     vpnExits = data.exits || [];
+    singboxRuntime = statusData.data || {};
+    combinationDirty = false;
+    $("singbox_combinations_dirty").style.display = "none";
     renderSingboxCombinations();
   } catch (err) {
     setCombinationMessage("error", err.message || "读取节点组合失败");
@@ -5747,6 +5904,7 @@ async function openSingboxCombinationsModal() {
 }
 
 function closeSingboxCombinationsModal() {
+  if (combinationDirty && !confirm("节点组合有未应用变更，确定关闭吗？")) return;
   $("singbox_combinations_modal").style.display = "none";
 }
 
@@ -5759,16 +5917,17 @@ async function saveSingboxCombinations() {
   button.disabled = true;
   setCombinationMessage("", "");
   try {
-    const res = await fetch("./api/singbox/combinations", {
+    const data = await apiFetch("./api/singbox/combinations", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ mappings, apply: true }),
     });
-    const data = await res.json();
-    if (!res.ok || !data.ok) throw new Error(data.error || "保存节点组合失败");
     singboxNodes = data.nodes || singboxNodes;
+    combinationDirty = false;
+    $("singbox_combinations_dirty").style.display = "none";
     renderSingboxCombinations();
     setCombinationMessage("success", data.message || "节点组合已保存并应用");
+    showToast("节点组合已应用");
     await load();
   } catch (err) {
     setCombinationMessage("error", err.message || "保存节点组合失败");
@@ -5814,7 +5973,7 @@ function renderSingboxNodeTable() {
   table.innerHTML = "";
   for (const node of singboxNodes) {
     const row = document.createElement("div");
-    row.style.cssText = "display:grid;grid-template-columns:minmax(0,1fr) 100px 56px auto;gap:8px;align-items:center;padding:9px 10px;border-bottom:1px solid var(--border-color);font-size:12px;";
+    row.style.cssText = "display:grid;grid-template-columns:minmax(0,1fr) 100px 78px 56px auto;gap:8px;align-items:center;padding:9px 10px;border-bottom:1px solid var(--border-color);font-size:12px;";
     const name = document.createElement("span");
     name.textContent = node.name || node.protocol;
     name.style.cssText = "overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-primary);";
@@ -5824,6 +5983,13 @@ function renderSingboxNodeTable() {
     const port = document.createElement("span");
     port.textContent = `:${node.port}`;
     port.style.color = node.enabled ? "var(--success)" : "var(--text-secondary)";
+    const runtimeNode = Array.isArray(singboxRuntime.nodes) ? singboxRuntime.nodes.find(item => item.id === node.id) : null;
+    const nodeState = runtimeNode && runtimeNode.chain_state ? runtimeNode.chain_state : (node.enabled && node.chain_enabled ? "unknown" : "disabled");
+    const stateLabels = { healthy: "健康", degraded: "降级", disabled: "已禁用", unknown: "未检测" };
+    const nodeStatus = document.createElement("span");
+    nodeStatus.textContent = stateLabels[nodeState] || nodeState;
+    nodeStatus.style.color = nodeState === "healthy" ? "var(--success)" : (nodeState === "degraded" ? "var(--warning)" : "var(--text-secondary)");
+    nodeStatus.title = runtimeNode && runtimeNode.chain_error ? runtimeNode.chain_error : nodeStatus.textContent;
     const actions = document.createElement("span");
     actions.style.cssText = "display:flex;gap:5px;justify-content:flex-end;";
     for (const [label, handler] of [["编辑", () => selectSingboxNode(node.id)], ["复制", () => copySingboxNodeLink(node.id)], ["删除", () => { selectedSingboxNodeId = node.id; deleteSingboxNode(); }]]) {
@@ -5834,7 +6000,7 @@ function renderSingboxNodeTable() {
       button.onclick = handler;
       actions.appendChild(button);
     }
-    row.append(name, protocol, port, actions);
+    row.append(name, protocol, nodeStatus, port, actions);
     table.appendChild(row);
   }
 }
@@ -5909,6 +6075,8 @@ function deleteSingboxNode() {
     setSingboxMessage("error", "至少需要保留一个协议节点。");
     return;
   }
+  const deleting = selectedSingboxNode();
+  if (!deleting || !confirm(`确定删除协议节点“${deleting.name || deleting.id}”吗？保存并应用后才会生效。`)) return;
   singboxNodes = singboxNodes.filter(node => node.id !== selectedSingboxNodeId);
   selectedSingboxNodeId = singboxNodes[0].id;
   renderSingboxNodeSelect();
@@ -5930,9 +6098,8 @@ async function copySingboxLink(uri) {
 
 async function copySingboxNodeLink(nodeId) {
   try {
-    const res = await fetch(`./api/singbox/client_info?node_id=${encodeURIComponent(nodeId)}`);
-    const data = await res.json();
-    if (!res.ok || !data.ok || !data.data.uri) throw new Error(data.error || "节点链接不可用");
+    const data = await apiFetch(`./api/singbox/client_info?node_id=${encodeURIComponent(nodeId)}`);
+    if (!data.data || !data.data.uri) throw new Error("节点链接不可用");
     await copySingboxLink(data.data.uri);
   } catch (err) {
     setSingboxMessage("error", err.message || "节点链接不可用，请先保存该节点。");
@@ -5944,9 +6111,8 @@ async function renderSingboxLinks() {
   list.innerHTML = "";
   for (const node of singboxNodes) {
     try {
-      const res = await fetch(`./api/singbox/client_info?node_id=${encodeURIComponent(node.id)}`);
-      const data = await res.json();
-      if (!res.ok || !data.ok || !data.data.uri) continue;
+      const data = await apiFetch(`./api/singbox/client_info?node_id=${encodeURIComponent(node.id)}`);
+      if (!data.data || !data.data.uri) continue;
       const row = document.createElement("div");
       row.style.cssText = "display:grid;grid-template-columns:140px minmax(0,1fr) auto;gap:8px;align-items:center;";
       const name = document.createElement("span");
@@ -5960,7 +6126,7 @@ async function renderSingboxLinks() {
       input.readOnly = true;
       const button = document.createElement("button");
       button.type = "button";
-      button.className = "connect-btn";
+      button.className = "connect-btn copy-btn";
       button.textContent = "复制";
       button.onclick = () => copySingboxLink(data.data.uri);
       row.append(name, input, button);
@@ -5984,6 +6150,10 @@ function toggleSingboxProtocolFields() {
 
 function renderSingboxRuntime(runtime) {
   const statusEl = $("singbox_runtime_status");
+  if (runtime.status_error) {
+    statusEl.textContent = "服务状态暂时无法读取，请稍后刷新。";
+    return;
+  }
   if (!runtime.installed) {
     statusEl.textContent = "未安装。安装后可提供 sing-box 协议入口，默认使用主机网络。";
     return;
@@ -5999,17 +6169,21 @@ async function openSingboxModal() {
   $("singbox_modal").style.display = "flex";
   $("admin_dropdown").style.display = "none";
   try {
-    const [configRes, statusRes] = await Promise.all([fetch("./api/singbox/config"), fetch("./api/singbox/status")]);
-    const configData = await configRes.json();
-    const statusData = await statusRes.json();
-    if (!configRes.ok || !configData.ok) throw new Error(configData.error || "读取 sing-box 配置失败");
+    const [configResult, statusResult] = await Promise.allSettled([
+      apiFetch("./api/singbox/config"),
+      apiFetch("./api/singbox/status"),
+    ]);
+    if (configResult.status !== "fulfilled") throw configResult.reason;
+    const configData = configResult.value;
+    const statusData = statusResult.status === "fulfilled" ? statusResult.value : { data: { status_error: true } };
     singboxNodes = configData.nodes || [];
     if (!singboxNodes.length) throw new Error("未找到协议节点");
     selectedSingboxNodeId = selectedSingboxNodeId && singboxNodes.some(node => node.id === selectedSingboxNodeId) ? selectedSingboxNodeId : singboxNodes[0].id;
+    singboxRuntime = statusData.data || {};
     renderSingboxNodeSelect();
     fillSingboxForm(selectedSingboxNode());
     await renderSingboxLinks();
-    if (statusRes.ok && statusData.ok) renderSingboxRuntime(statusData.data || {});
+    renderSingboxRuntime(singboxRuntime);
   } catch (err) {
     setSingboxMessage("error", err.message || "读取 sing-box 状态失败");
   }
@@ -6071,17 +6245,21 @@ async function saveSingboxConfig(event) {
     return;
   }
   singboxNodes[currentIndex] = current;
+  const names = singboxNodes.map(node => String(node.name || "").trim().toLocaleLowerCase());
+  if (new Set(names).size !== names.length) {
+    setSingboxMessage("error", "协议节点名称不能重复，请为每个节点设置唯一名称");
+    return;
+  }
   submit.disabled = true;
   submit.textContent = "正在校验并应用...";
   try {
-    const res = await fetch("./api/singbox/config", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ nodes: singboxNodes, apply: true }) });
-    const data = await res.json();
-    if (!res.ok || !data.ok) throw new Error(data.error || "保存 sing-box 配置失败");
+    const data = await apiFetch("./api/singbox/config", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ nodes: singboxNodes, apply: true }) });
     singboxNodes = data.nodes || singboxNodes;
     renderSingboxNodeSelect();
     fillSingboxForm(selectedSingboxNode());
     await renderSingboxLinks();
     setSingboxMessage("success", data.message || "配置已应用");
+    showToast("sing-box 配置已应用");
     await loadSingboxClientInfo();
     await load();
   } catch (err) {
@@ -6137,13 +6315,7 @@ load();
 setInterval(async () => {
   if (typeof state !== "undefined" && !state.is_connecting && (!testingNodeIds || !testingNodeIds.size) && document.visibilityState === "visible") {
     try {
-      const r = await fetch("./api/nodes");
-      const d = await r.json();
-      nodes = d.nodes || [];
-      state = d.state || {};
-      stableSortNodes();
-      updateCountryFilter();
-      render();
+      await load();
     } catch(e) {}
   }
 }, 10000);
