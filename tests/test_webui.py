@@ -50,6 +50,24 @@ class WebUiContractTests(unittest.TestCase):
         self.assertIn("$PKG_MGR install -y qrencode ||", installer)
         self.assertGreaterEqual(installer.count("其余功能不受影响"), 3)
 
+    def test_ml_uninstall_removes_aimilivpn_owned_singbox(self):
+        installer = Path(__file__).resolve().parents[1].joinpath("install.sh").read_text(encoding="utf-8")
+
+        self.assertIn("def uninstall_singbox():", installer)
+        self.assertIn('["systemctl", "disable", "--now", "sing-box.service"]', installer)
+        self.assertIn('["rc-update", "del", "sing-box", "default"]', installer)
+        for path in (
+            '"/lib/systemd/system/sing-box.service"',
+            '"/etc/systemd/system/sing-box.service.d/aimilivpn.conf"',
+            '"/etc/init.d/sing-box"',
+            '"/usr/local/bin/sing-box"',
+            '"/usr/local/bin/sb"',
+            '"/etc/sing-box"',
+            '"/var/log/sing-box"',
+        ):
+            self.assertIn(path, installer)
+        self.assertIn("uninstall_singbox()", installer)
+
     def test_readme_installer_does_not_execute_http_error_pages(self):
         readme = Path(__file__).resolve().parents[1].joinpath("README.md").read_text(encoding="utf-8")
 

@@ -568,6 +568,45 @@ def stop_service():
     print("已发送停止指令。")
     time.sleep(1)
 
+def uninstall_singbox():
+    """Stop and remove the sing-box installation owned by AimiliVPN."""
+    print("正在停止并删除 sing-box...", flush=True)
+    if shutil.which("systemctl"):
+        subprocess.run(["systemctl", "disable", "--now", "sing-box.service"], check=False)
+        subprocess.run(["systemctl", "daemon-reload"], check=False)
+    elif shutil.which("rc-service"):
+        subprocess.run(["rc-service", "sing-box", "stop"], check=False)
+        subprocess.run(["rc-update", "del", "sing-box", "default"], check=False)
+
+    for raw_path in (
+        "/lib/systemd/system/sing-box.service",
+        "/etc/systemd/system/sing-box.service.d/aimilivpn.conf",
+        "/etc/init.d/sing-box",
+        "/usr/local/bin/sing-box",
+        "/usr/local/bin/sb",
+        "/etc/sing-box",
+        "/var/log/sing-box",
+    ):
+        path = Path(raw_path)
+        try:
+            if path.is_dir() and not path.is_symlink():
+                shutil.rmtree(path)
+            else:
+                path.unlink()
+        except FileNotFoundError:
+            pass
+        except Exception as exc:
+            print(f"警告：删除 {raw_path} 失败: {exc}", flush=True)
+
+    dropin_dir = Path("/etc/systemd/system/sing-box.service.d")
+    try:
+        dropin_dir.rmdir()
+    except OSError:
+        pass
+    if shutil.which("systemctl"):
+        subprocess.run(["systemctl", "daemon-reload"], check=False)
+    print("sing-box 已删除。", flush=True)
+
 def restart_service():
     print("正在重启 AimiliVPN 服务...", flush=True)
     run_service_cmd("restart")
@@ -650,6 +689,7 @@ def uninstall_service():
     if confirm.lower() == 'y':
         print("正在完全卸载 AimiliVPN...", flush=True)
         stop_service()
+        uninstall_singbox()
         if shutil.which("systemctl"):
             subprocess.run(["systemctl", "disable", "aimilivpn.service"])
             try:

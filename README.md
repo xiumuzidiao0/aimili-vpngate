@@ -41,6 +41,8 @@ tmp=$(mktemp) && curl -LfsS --retry 5 --retry-delay 2 --connect-timeout 15 -o "$
 该命令会在执行前检查 HTTP 状态和脚本头。如果下载站返回 `429`、`404` 或 HTML 错误页，安装会直接失败并显示错误，不会把错误页交给 `bash`。
 > 💡 **小贴士**：部署完成后，终端会输出管理网页的专属链接（含随机安全后缀，如 `http://your_vps_ip:8787/u71e9IXp4TPx`）。在终端中输入 `ml` 命令可以随时调出交互式命令行管理菜单。
 
+在 `ml` 菜单选择“完全卸载”或执行 `ml uninstall` 时，会停止并删除 AimiliVPN 及其安装的 sing-box 服务、配置、二进制和日志；OpenVPN 等系统通用依赖不会被删除。
+
 ---
 
 ### 💡 快速使用指南 (小白必看)
@@ -188,6 +190,8 @@ tmp=$(mktemp) && curl -LfsS --retry 5 --retry-delay 2 --connect-timeout 15 -o "$
 The command checks the HTTP response and script shebang before execution, so a `429`, `404`, or HTML error page is never passed to `bash`.
 
 > 💡 **Quick Note**: Once installed, copy the printed URL from the terminal to access the Web UI. Type the `ml` command in the terminal to summon the interactive CLI management console.
+
+Choosing "Complete uninstall" from `ml`, or running `ml uninstall`, stops and removes AimiliVPN together with the sing-box service, configuration, binary, and logs installed for it. Shared system dependencies such as OpenVPN are kept.
 
 ---
 
