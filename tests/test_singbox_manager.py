@@ -263,6 +263,25 @@ class VpnExitTests(unittest.TestCase):
 
         self.assertEqual([node["id"] for node in candidates], ["jp-fast", "jp-slow"])
 
+    def test_auto_exit_placeholder_values_are_normalized_to_empty_node_id(self):
+        ui_config = {"proxy_port": 7928, "port": 8787, "singbox": {"nodes": []}}
+        raw_exits = [{
+            "id": "japan",
+            "name": "日本自动出口",
+            "node_id": "自动切换（按国家和 IP 类型）",
+            "country": "日本",
+            "ip_type": "residential",
+            "proxy_port": 7929,
+            "enabled": True,
+        }]
+
+        with patch.object(vpngate_manager, "read_nodes", return_value=[]), \
+             patch.object(vpngate_manager, "current_vpn_exits", return_value=[]), \
+             patch.object(vpngate_manager, "current_singbox_nodes", return_value=[]):
+            normalized = vpngate_manager.normalize_vpn_exits(raw_exits, ui_config)
+
+        self.assertEqual(normalized[1]["node_id"], "")
+
     def test_auto_extra_exit_fails_over_to_next_matching_node(self):
         exit_config = {
             "id": "japan",

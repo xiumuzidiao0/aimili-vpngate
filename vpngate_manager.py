@@ -869,6 +869,15 @@ def stop_vpn_exit_proxy(exit_id: str, proxy_port: int) -> None:
         vpn_exit_proxy_ports.discard(proxy_port)
 
 
+def normalize_vpn_exit_node_id(value: Any) -> str:
+    node_id = str(value or "").strip()
+    if node_id.casefold() in {"", "auto", "automatic", "undefined", "null"}:
+        return ""
+    if node_id.startswith("自动切换"):
+        return ""
+    return node_id
+
+
 def normalize_vpn_exits(raw_exits: Any, ui_cfg: dict[str, Any]) -> list[dict[str, Any]]:
     if not isinstance(raw_exits, list):
         raise ValueError("VPN 出口列表必须是数组")
@@ -889,7 +898,7 @@ def normalize_vpn_exits(raw_exits: Any, ui_cfg: dict[str, Any]) -> list[dict[str
         incoming_by_id[exit_id] = raw
 
     default_raw = incoming_by_id.pop("default", {})
-    default_node_id = str(default_raw.get("node_id") or "").strip()
+    default_node_id = normalize_vpn_exit_node_id(default_raw.get("node_id"))
     if default_node_id and default_node_id not in node_ids:
         raise ValueError("默认出口选择的 VPNGate 节点不存在")
     default_ip_type = str(default_raw.get("ip_type") or "all").strip().lower()
@@ -922,7 +931,7 @@ def normalize_vpn_exits(raw_exits: Any, ui_cfg: dict[str, Any]) -> list[dict[str
             raise ValueError("VPN 出口 IP 类型无效")
         if proxy_port in used_ports or proxy_port == ui_port or proxy_port in singbox_ports:
             raise ValueError("VPN 出口本地端口与已有服务冲突")
-        node_id = str(raw.get("node_id") or "").strip()
+        node_id = normalize_vpn_exit_node_id(raw.get("node_id"))
         if node_id and node_id not in node_ids:
             raise ValueError("VPN 出口选择的 VPNGate 节点不存在")
         allocation_source = existing_by_id.get(exit_id, raw)
@@ -6234,13 +6243,15 @@ function fillVpnExitForm(exitConfig) {
 function collectVpnExit() {
   const previous = selectedVpnExit();
   if (!previous) return null;
+  const selectedNodeId = String($("ve_node").value || "").trim();
+  const automaticNodeValues = new Set(["auto", "automatic", "undefined", "null"]);
   return {
     ...previous,
     name: $("ve_name").value.trim(),
     proxy_port: parseInt($("ve_port").value, 10),
     country: $("ve_country").value,
     ip_type: $("ve_ip_type").value,
-    node_id: $("ve_node").value,
+    node_id: automaticNodeValues.has(selectedNodeId.toLowerCase()) || selectedNodeId.startsWith("自动切换") ? "" : selectedNodeId,
     enabled: $("ve_enabled").checked
   };
 }
