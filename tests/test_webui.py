@@ -35,6 +35,19 @@ class WebUiContractTests(unittest.TestCase):
         self.assertIn('id="ve_min_speed"', html)
         self.assertIn("自动切换（按国家和 IP 类型）", html)
 
+    def test_webui_refreshes_are_single_flight_and_preserve_dirty_workspaces(self):
+        html = vpngate_manager.INDEX_HTML
+
+        self.assertIn("const pageSize = 50;", html)
+        self.assertIn("function confirmReloadPrimaryView", html)
+        self.assertIn('confirmReloadPrimaryView("singbox", singboxDirty', html)
+        self.assertIn('confirmReloadPrimaryView("vpn-exits", vpnExitsDirty', html)
+        self.assertIn('confirmReloadPrimaryView("combinations", combinationDirty', html)
+        self.assertIn("let loadInFlight = null;", html)
+        self.assertIn("await load({ refreshWorkspace: true });", html)
+        self.assertIn("Promise.all(singboxNodes.map", html)
+        self.assertIn("history.replaceState({ view: current }", html)
+
     def test_mobile_node_list_uses_object_cards(self):
         html = vpngate_manager.INDEX_HTML
 

@@ -4829,7 +4829,7 @@ INDEX_HTML = r"""<!doctype html>
 <script>
 let nodes=[], state={}, testingNodeIds = new Set();
 let currentPage = 1;
-const pageSize = 99999;
+const pageSize = 50;
 let currentPageNodes = [];
 
 const $=id=>document.getElementById(id);
@@ -4899,6 +4899,11 @@ function confirmLeavePrimaryView(nextView) {
   if (current === "vpn-exits" && typeof vpnExitsDirty !== "undefined" && vpnExitsDirty && !confirm("VPNGate 出口有未保存变更，确定离开吗？")) return false;
   if (current === "combinations" && typeof combinationDirty !== "undefined" && combinationDirty && !confirm("节点组合有未应用变更，确定离开吗？")) return false;
   return true;
+}
+
+function confirmReloadPrimaryView(view, dirty, message) {
+  if (currentPrimaryView() !== view || !dirty) return true;
+  return confirm(message);
 }
 
 function setPrimaryView(view, updateHistory = true) {
@@ -5411,13 +5416,12 @@ async function testNode(btn, id, event){
   render();
   
   try {
-    const response = await fetch("./api/test_node", {
+    const result = await apiFetch("./api/test_node", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ id })
     });
-    const result = await response.json();
-    if (result.ok && result.node) {
+    if (result.node) {
       const idx = nodes.findIndex(n => n && n.id === id);
       if (idx !== -1) {
         nodes[idx] = result.node;
@@ -5433,16 +5437,13 @@ async function testNode(btn, id, event){
 async function toggleFavorite(id, event) {
   if (event) event.stopPropagation();
   try {
-    const response = await fetch("./api/toggle_favorite", {
+    const result = await apiFetch("./api/toggle_favorite", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ id })
     });
-    const result = await response.json();
-    if (result.ok) {
-      state.favorite_node_ids = Array.isArray(result.favorite_node_ids) ? result.favorite_node_ids : [];
-      render();
-    }
+    state.favorite_node_ids = Array.isArray(result.favorite_node_ids) ? result.favorite_node_ids : [];
+    render();
   } catch (e) {
     console.error("切换收藏失败", e);
   }
@@ -5450,6 +5451,8 @@ async function toggleFavorite(id, event) {
 
 let pollInterval = null;
 let refreshPollInterval = null;
+let pollRequestInFlight = false;
+let refreshPollRequestInFlight = false;
 
 function refreshButtonBusy(message = "正在后台更新...") {
   const btn = $("refresh");
@@ -5469,9 +5472,10 @@ function startRefreshPolling() {
   if (refreshPollInterval) clearInterval(refreshPollInterval);
   refreshButtonBusy("正在检测节点...");
   refreshPollInterval = setInterval(async () => {
+    if (refreshPollRequestInFlight) return;
+    refreshPollRequestInFlight = true;
     try {
-      const resp = await fetch("./api/nodes");
-      const data = await resp.json();
+      const data = await apiFetch("./api/nodes");
       nodes = Array.isArray(data.nodes) ? data.nodes : [];
       state = data.state || {};
       stableSortNodes();
@@ -5487,6 +5491,8 @@ function startRefreshPolling() {
       clearInterval(refreshPollInterval);
       refreshPollInterval = null;
       refreshButtonIdle();
+    } finally {
+      refreshPollRequestInFlight = false;
     }
   }, 1000);
 }
@@ -5494,9 +5500,10 @@ function startRefreshPolling() {
 function startConnectionPolling() {
   if (pollInterval) clearInterval(pollInterval);
   pollInterval = setInterval(async () => {
+    if (pollRequestInFlight) return;
+    pollRequestInFlight = true;
     try {
-      const resp = await fetch("./api/nodes");
-      const data = await resp.json();
+      const data = await apiFetch("./api/nodes");
       nodes = Array.isArray(data.nodes) ? data.nodes : [];
       state = data.state || {};
       stableSortNodes();
@@ -5507,7 +5514,7 @@ function startConnectionPolling() {
         clearInterval(pollInterval);
         pollInterval = null;
         try {
-          await fetch("./api/test_proxy", { method: "POST" });
+          await apiFetch("./api/test_proxy", { method: "POST" });
         } catch(pe){}
         load();
       }
@@ -5515,6 +5522,8 @@ function startConnectionPolling() {
       clearInterval(pollInterval);
       pollInterval = null;
       load();
+    } finally {
+      pollRequestInFlight = false;
     }
   }, 1000);
 }
@@ -5529,24 +5538,13 @@ async function connectNode(id){
   startConnectionPolling();
   
   try {
-    const r = await fetch("./api/connect",{
+    await apiFetch("./api/connect",{
       method:"POST",
       headers:{"Content-Type":"application/json"},
       body:JSON.stringify({id})
     });
-    const result = await r.json();
-    if (!result.ok) {
-      alert("连接失败: " + (result.error || "未知错误"));
-      if (pollInterval) {
-        clearInterval(pollInterval);
-        pollInterval = null;
-      }
-      state.is_connecting = false;
-      render();
-      return;
-    }
   } catch(e) {
-    alert("连接请求错误");
+    alert("连接失败: " + (e.message || "未知错误"));
     if (pollInterval) {
       clearInterval(pollInterval);
       pollInterval = null;
@@ -5559,18 +5557,11 @@ async function connectNode(id){
 async function disconnectNode(){
   if (!confirm("确定要断开当前的 VPN 连接吗？")) return;
   try {
-    const response = await fetch("./api/disconnect", { method: "POST" });
-    const result = await response.json();
-    if (result.ok) {
-      try {
-        await fetch("./api/test_proxy", { method: "POST" });
-      } catch(pe){}
-      load();
-    } else {
-      alert("断开连接失败: " + (result.error || "未知错误"));
-    }
+    await apiFetch("./api/disconnect", { method: "POST" });
+    try { await apiFetch("./api/test_proxy", { method: "POST" }); } catch(pe){}
+    await load();
   } catch (e) {
-    alert("请求断开连接失败");
+    alert("断开连接失败: " + (e.message || "未知错误"));
   }
 }
 
@@ -5578,38 +5569,57 @@ async function disconnectNode(){
 
 
 
-async function load(){
-  try {
-    const [nodeData, singboxResult, exitsResult] = await Promise.allSettled([
-      apiFetch("./api/nodes"),
-      apiFetch("./api/singbox/status"),
-      apiFetch("./api/vpn-exits")
-    ]);
-    if (nodeData.status !== "fulfilled") throw nodeData.reason;
-    const d = nodeData.value;
-    nodes=Array.isArray(d.nodes) ? d.nodes : [];
-    state=d.state||{};
-    renderOverview(
-      singboxResult.status === "fulfilled" ? singboxResult.value.data : null,
-      exitsResult.status === "fulfilled" ? exitsResult.value.exits : null,
-    );
-    if (singboxResult.status === "rejected" || exitsResult.status === "rejected") {
-      showToast("部分管理状态暂时无法读取，列表数据仍可用。", "warning", 5000);
-    }
-  } catch (err) {
-    showToast(err.message || "读取节点数据失败", "error", 5000);
-    setOverviewValue("overview_updated", "读取失败", "error");
-    return;
-  }
-  
-  stableSortNodes();
-  updateCountryFilter();
-  render();
+let loadInFlight = null;
 
-  if (state.maintenance_running) {
-    startRefreshPolling();
-  } else if (state.is_connecting) {
-    startConnectionPolling();
+async function load(options = {}) {
+  if (loadInFlight) return loadInFlight;
+  const refreshWorkspace = Boolean(options.refreshWorkspace);
+  const request = (async () => {
+    let snapshot = null;
+    try {
+      const [nodeData, singboxResult, exitsResult] = await Promise.allSettled([
+        apiFetch("./api/nodes"),
+        apiFetch("./api/singbox/status"),
+        apiFetch("./api/vpn-exits")
+      ]);
+      if (nodeData.status !== "fulfilled") throw nodeData.reason;
+      const d = nodeData.value;
+      nodes = Array.isArray(d.nodes) ? d.nodes : [];
+      state = d.state || {};
+      snapshot = {
+        singbox: singboxResult.status === "fulfilled" ? singboxResult.value.data : null,
+        exits: exitsResult.status === "fulfilled" ? exitsResult.value.exits : null,
+        exitNodes: exitsResult.status === "fulfilled" ? exitsResult.value.nodes : null,
+      };
+      renderOverview(snapshot.singbox, snapshot.exits);
+      if (singboxResult.status === "rejected" || exitsResult.status === "rejected") {
+        showToast("部分管理状态暂时无法读取，列表数据仍可用。", "warning", 5000);
+      }
+    } catch (err) {
+      showToast(err.message || "读取节点数据失败", "error", 5000);
+      setOverviewValue("overview_updated", "读取失败", "error");
+      return null;
+    }
+
+    stableSortNodes();
+    updateCountryFilter();
+    render();
+
+    if (state.maintenance_running) {
+      startRefreshPolling();
+    } else if (state.is_connecting) {
+      startConnectionPolling();
+    }
+    if (refreshWorkspace) {
+      try { await refreshVisibleWorkspaceStatus(snapshot); } catch (_) {}
+    }
+    return snapshot;
+  })();
+  loadInFlight = request;
+  try {
+    return await request;
+  } finally {
+    if (loadInFlight === request) loadInFlight = null;
   }
 }
 $("country_filter").onchange=()=>{ currentPage = 1; render(); };
@@ -5643,9 +5653,8 @@ $("btn_test_proxy").onclick = async () => {
   latVal.textContent = "";
   
   try {
-    const response = await fetch("./api/test_proxy", { method: "POST" });
-    const result = await response.json();
-    if (result.ok) {
+    const result = await apiFetch("./api/test_proxy", { method: "POST" });
+    if (result.ok !== false) {
       badge.className = "badge available";
       badge.textContent = "可用";
       ipVal.textContent = result.ip || "-";
@@ -5659,10 +5668,11 @@ $("btn_test_proxy").onclick = async () => {
       latVal.innerHTML = `<span class="latency-val latency-poor" style="margin-left:8px; font-size:11px;" title="${esc(result.error)}">连接失败</span>`;
     }
   } catch (e) {
+    const serviceError = e && e.data && e.status !== 401 && e.status !== 403;
     badge.className = "badge unavailable";
-    badge.textContent = "网络错误";
+    badge.textContent = serviceError ? "不可用" : "网络错误";
     ipVal.textContent = "-";
-    latVal.innerHTML = `<span class="latency-val latency-poor" style="margin-left:8px; font-size:11px;">请求出错</span>`;
+    latVal.innerHTML = `<span class="latency-val latency-poor" style="margin-left:8px; font-size:11px;" title="${esc(e && e.message)}">${serviceError ? "连接失败" : "请求出错"}</span>`;
   } finally {
     btn.disabled = false;
     btn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" style="width:16px; height:16px;" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" /></svg> 测试代理`;
@@ -5748,7 +5758,7 @@ async function toggleFavRouting() {
   updateFavPanelUI();
   
   try {
-    const res = await fetch("./api/update_routing", {
+    await apiFetch("./api/update_routing", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -5757,16 +5767,10 @@ async function toggleFavRouting() {
         routing_ip_type: state.routing_ip_type || "all"
       })
     });
-    const data = await res.json();
-    if (res.ok && data.ok) {
-      load();
-    } else {
-      alert("更新出站路由设置失败: " + (data.error || "未知错误"));
-      load();
-    }
+    await load();
   } catch (err) {
-    alert("连接服务器失败，请稍后重试");
-    load();
+    alert("更新出站路由设置失败: " + (err.message || "未知错误"));
+    await load();
   }
 }
 
@@ -5922,7 +5926,7 @@ async function saveCredentials(e) {
   submitBtn.textContent = "正在保存...";
   
   try {
-    const res = await fetch("./api/update_credentials", {
+    const data = await apiFetch("./api/update_credentials", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -5932,10 +5936,7 @@ async function saveCredentials(e) {
         secret_path: suffix
       })
     });
-    
-    const data = await res.json();
-    if (res.ok && data.ok) {
-      if (data.restart_needed) {
+    if (data.restart_needed) {
         successDiv.textContent = "保存成功！网页管理端口或路径已变更，页面将在 4 秒内自动跳转...";
         successDiv.style.display = "block";
         
@@ -5947,7 +5948,7 @@ async function saveCredentials(e) {
           const host = window.location.hostname;
           window.location.href = `${protocol}//${host}:${port}/${suffix}/`;
         }, 4000);
-      } else {
+    } else {
         successDiv.textContent = data.reauth_required ? "账号密码保存成功，请重新登录..." : "账号密码保存成功，已即时生效！";
         successDiv.style.display = "block";
         setTimeout(() => {
@@ -5958,15 +5959,9 @@ async function saveCredentials(e) {
             load();
           }
         }, 1500);
-      }
-    } else {
-      errorDivEl.textContent = data.error || "保存失败，请检查输入";
-      errorDivEl.style.display = "block";
-      submitBtn.disabled = false;
-      submitBtn.textContent = "保存修改";
     }
   } catch (err) {
-    errorDivEl.textContent = "连接服务器失败，请稍后重试";
+    errorDivEl.textContent = err.message || "连接服务器失败，请稍后重试";
     errorDivEl.style.display = "block";
     submitBtn.disabled = false;
     submitBtn.textContent = "保存修改";
@@ -6037,7 +6032,7 @@ async function saveNetwork(e) {
   submitBtn.textContent = "正在保存...";
   
   try {
-    const res = await fetch("./api/update_settings", {
+    const data = await apiFetch("./api/update_settings", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -6047,10 +6042,7 @@ async function saveNetwork(e) {
         routing_ip_type: routingIpType
       })
     });
-    
-    const data = await res.json();
-    if (res.ok && data.ok) {
-      if (data.restart_needed) {
+    if (data.restart_needed) {
         successDiv.textContent = "保存成功！代理出站端口已变更，页面将在 4 秒内自动刷新...";
         successDiv.style.display = "block";
         
@@ -6060,22 +6052,16 @@ async function saveNetwork(e) {
         setTimeout(() => {
           window.location.reload();
         }, 4000);
-      } else {
+    } else {
         successDiv.textContent = "配置保存成功，已即时生效！";
         successDiv.style.display = "block";
         setTimeout(() => {
           closeNetworkModal();
           load();
         }, 1500);
-      }
-    } else {
-      errorDivEl.textContent = data.error || "保存失败，请检查输入";
-      errorDivEl.style.display = "block";
-      submitBtn.disabled = false;
-      submitBtn.textContent = "保存修改";
     }
   } catch (err) {
-    errorDivEl.textContent = "连接服务器失败，请稍后重试";
+    errorDivEl.textContent = err.message || "连接服务器失败，请稍后重试";
     errorDivEl.style.display = "block";
     submitBtn.disabled = false;
     submitBtn.textContent = "保存修改";
@@ -6107,6 +6093,8 @@ let singboxDirty = false;
 let vpnExitsDirty = false;
 let singboxLinkCache = new Map();
 let singboxQrNodeId = "";
+let singboxLinksRenderId = 0;
+let singboxClientInfoRequestId = 0;
 
 function markSingboxDirty() {
   singboxDirty = true;
@@ -6364,19 +6352,16 @@ async function vpnExitAction(id, action) {
   if (action === "stop" && exitConfig && !confirm(`确定停止出口“${exitConfig.name || id}”吗？绑定该出口的客户端链路会暂时降级。`)) return;
   try {
     const data = await apiFetch("./api/vpn-exits/action", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id, action }) });
-    const statusData = await apiFetch("./api/vpn-exits");
-    vpnExits = statusData.exits || vpnExits;
-    fillVpnExitForm(selectedVpnExit());
-    renderVpnExitTable();
+    await load({ refreshWorkspace: true });
     setVpnExitMessage("success", data.message || "VPN 出口操作成功");
     showToast(data.message || "VPN 出口操作成功");
-    await load();
   } catch (err) {
     setVpnExitMessage("error", err.message || "VPN 出口操作失败");
   }
 }
 
 async function openVpnExitsModal(updateHistory = true) {
+  if (!confirmReloadPrimaryView("vpn-exits", vpnExitsDirty, "VPNGate 出口有未保存变更，确定重新读取并覆盖吗？")) return;
   if (!setPrimaryView("vpn-exits", updateHistory)) return;
   setVpnExitMessage("", "");
   vpnExitsDirty = false;
@@ -6564,6 +6549,7 @@ async function refreshSingboxCombinations() {
 }
 
 async function openSingboxCombinationsModal(updateHistory = true) {
+  if (!confirmReloadPrimaryView("combinations", combinationDirty, "节点组合有未应用变更，确定重新读取并覆盖吗？")) return;
   if (!setPrimaryView("combinations", updateHistory)) return;
   setCombinationMessage("", "");
   await refreshSingboxCombinations();
@@ -6832,17 +6818,18 @@ function showSingboxQr(nodeId = selectedSingboxNodeId) {
 }
 
 async function exportSingboxLinks(format = "text") {
-  const links = [];
-  for (const node of singboxNodes) {
+  const links = (await Promise.all(singboxNodes.map(async node => {
     try {
       let uri = singboxLinkCache.get(node.id);
       if (!uri) {
         const data = await apiFetch(`./api/singbox/client_info?node_id=${encodeURIComponent(node.id)}`);
         uri = data.data && data.data.uri;
       }
-      if (uri) links.push({ name: node.name || node.protocol, protocol: node.protocol, server: node.public_host, port: node.port, uri });
-    } catch (_) {}
-  }
+      return uri ? { name: node.name || node.protocol, protocol: node.protocol, server: node.public_host, port: node.port, uri } : null;
+    } catch (_) {
+      return null;
+    }
+  }))).filter(Boolean);
   if (!links.length) {
     showToast("没有可导出的已保存节点链接。", "warning");
     return;
@@ -6870,25 +6857,32 @@ async function copySingboxNodeLink(nodeId) {
 
 async function renderSingboxLinks() {
   const list = $("sb_node_links");
+  const renderId = ++singboxLinksRenderId;
   list.innerHTML = "";
-  singboxLinkCache = new Map();
-  for (const node of singboxNodes) {
+  const results = (await Promise.all(singboxNodes.map(async node => {
     try {
       const data = await apiFetch(`./api/singbox/client_info?node_id=${encodeURIComponent(node.id)}`);
-      if (!data.data || !data.data.uri) continue;
-      singboxLinkCache.set(node.id, data.data.uri);
+      return data.data && data.data.uri ? { node, data: data.data } : null;
+    } catch (_) {
+      return null;
+    }
+  }))).filter(Boolean);
+  if (renderId !== singboxLinksRenderId) return;
+  singboxLinkCache = new Map();
+  for (const { node, data } of results) {
+      singboxLinkCache.set(node.id, data.uri);
       const row = document.createElement("div");
       row.style.cssText = "display:grid;grid-template-columns:140px minmax(0,1fr) auto;gap:8px;align-items:center;";
       const name = document.createElement("span");
-      const displayName = data.data.name || node.name || node.protocol || node.id;
-      name.textContent = data.data.endpoint ? `${displayName} (${data.data.endpoint})` : displayName;
+      const displayName = data.name || node.name || node.protocol || node.id;
+      name.textContent = data.endpoint ? `${displayName} (${data.endpoint})` : displayName;
       name.title = name.textContent;
       name.style.cssText = "overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-primary);font-size:12px;";
       const input = document.createElement("input");
       input.className = "input-field mono";
       input.type = "password";
       input.id = `sb_link_${node.id}`;
-      input.value = data.data.uri;
+      input.value = data.uri;
       input.readOnly = true;
       const revealButton = document.createElement("button");
       revealButton.type = "button";
@@ -6899,7 +6893,7 @@ async function renderSingboxLinks() {
       button.type = "button";
       button.className = "connect-btn copy-btn";
       button.textContent = "复制";
-      button.onclick = () => copySingboxLink(data.data.uri);
+      button.onclick = () => copySingboxLink(data.uri);
       const qrButton = document.createElement("button");
       qrButton.type = "button";
       qrButton.className = "connect-btn";
@@ -6911,7 +6905,6 @@ async function renderSingboxLinks() {
       row.style.gridTemplateColumns = "140px minmax(0,1fr) auto";
       row.append(name, input, actions);
       list.appendChild(row);
-    } catch (_) {}
   }
 }
 
@@ -6945,6 +6938,7 @@ function renderSingboxRuntime(runtime) {
 }
 
 async function openSingboxModal(updateHistory = true) {
+  if (!confirmReloadPrimaryView("singbox", singboxDirty, "sing-box 节点有未保存变更，确定重新读取并覆盖吗？")) return;
   if (!setPrimaryView("singbox", updateHistory)) return;
   setSingboxMessage("", "");
   singboxDirty = false;
@@ -6981,9 +6975,7 @@ async function singboxAction(action) {
   const submit = $("singbox_submit_btn");
   submit.disabled = true;
   try {
-    const res = await fetch("./api/singbox/action", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action }) });
-    const data = await res.json();
-    if (!res.ok || !data.ok) throw new Error(data.error || "sing-box 操作失败");
+    const data = await apiFetch("./api/singbox/action", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action }) });
     setSingboxMessage("success", data.message || "sing-box 服务操作成功");
     if (action === "install") await openSingboxModal();
     await load();
@@ -6997,9 +6989,7 @@ async function singboxAction(action) {
 async function regenerateSingbox(kind) {
   setSingboxMessage("", "");
   try {
-    const res = await fetch("./api/singbox/regenerate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ kind }) });
-    const data = await res.json();
-    if (!res.ok || !data.ok) throw new Error(data.error || "生成凭据失败");
+    const data = await apiFetch("./api/singbox/regenerate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ kind }) });
     const values = data.values || {};
     if (values.uuid) $("sb_uuid").value = values.uuid;
     if (values.short_id) $("sb_short_id").value = values.short_id;
@@ -7058,18 +7048,19 @@ async function saveSingboxConfig(event, apply = true) {
 }
 
 async function loadSingboxClientInfo() {
+  const requestId = ++singboxClientInfoRequestId;
   try {
     const node = collectSingboxNode();
     if (!node) throw new Error("未选择协议节点");
-    const res = await fetch("./api/singbox/preview", {
+    const data = await apiFetch("./api/singbox/preview", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ node })
     });
-    const data = await res.json();
-    if (!res.ok || !data.ok) throw new Error(data.error || "客户端连接地址不可用");
+    if (requestId !== singboxClientInfoRequestId) return;
     $("sb_client_uri").value = data.data.uri || "";
   } catch (err) {
+    if (requestId !== singboxClientInfoRequestId) return;
     $("sb_client_uri").value = "";
     setSingboxMessage("error", err.message || "客户端连接地址不可用");
   }
@@ -7085,10 +7076,8 @@ function closeVpsModal() {
 
 async function logoutAdmin() {
   try {
-    const res = await fetch("./api/logout", { method: "POST" });
-    if (res.ok) {
-      window.location.reload();
-    }
+    await apiFetch("./api/logout", { method: "POST" });
+    window.location.reload();
   } catch (err) {
     console.error("退出登录失败", err);
     window.location.reload();
@@ -7113,7 +7102,7 @@ window.addEventListener("popstate", async () => {
   const current = currentPrimaryView();
   await openPrimaryViewFromLocation(false);
   if (currentPrimaryView() !== requested) {
-    history.pushState({ view: current }, "", `#/${current}`);
+    history.replaceState({ view: current }, "", `#/${current}`);
   }
 });
 
@@ -7125,17 +7114,17 @@ window.addEventListener("popstate", async () => {
   await openPrimaryViewFromLocation(false);
 })();
 
-async function refreshVisibleWorkspaceStatus() {
+async function refreshVisibleWorkspaceStatus(snapshot = null) {
   const view = currentPrimaryView();
   if (view === "singbox" && !singboxDirty) {
-    const data = await apiFetch("./api/singbox/status");
-    singboxRuntime = data.data || {};
+    const data = snapshot && snapshot.singbox ? snapshot.singbox : (await apiFetch("./api/singbox/status")).data;
+    singboxRuntime = data || {};
     renderSingboxRuntime(singboxRuntime);
     renderSingboxNodeTable();
     return;
   }
   if (view === "vpn-exits" && !vpnExitsDirty) {
-    const data = await apiFetch("./api/vpn-exits");
+    const data = snapshot && snapshot.exits ? { exits: snapshot.exits, nodes: snapshot.exitNodes } : await apiFetch("./api/vpn-exits");
     vpnExits = data.exits || vpnExits;
     vpnExitNodes = data.nodes || vpnExitNodes;
     fillVpnExitForm(selectedVpnExit());
@@ -7147,7 +7136,7 @@ async function refreshVisibleWorkspaceStatus() {
   if (view === "combinations" && !combinationDirty) {
     const [combinationData, statusData] = await Promise.all([
       apiFetch("./api/singbox/combinations"),
-      apiFetch("./api/singbox/status"),
+      snapshot && snapshot.singbox ? Promise.resolve({ data: snapshot.singbox }) : apiFetch("./api/singbox/status"),
     ]);
     singboxNodes = combinationData.nodes || singboxNodes;
     vpnExits = combinationData.exits || vpnExits;
@@ -7161,8 +7150,7 @@ async function refreshVisibleWorkspaceStatus() {
 setInterval(async () => {
   if (typeof state !== "undefined" && !state.is_connecting && (!testingNodeIds || !testingNodeIds.size) && document.visibilityState === "visible") {
     try {
-      await load();
-      await refreshVisibleWorkspaceStatus();
+      await load({ refreshWorkspace: true });
     } catch(e) {}
   }
 }, 10000);
@@ -7186,8 +7174,7 @@ function closeGatewayModal() {
 
 async function loadGatewayStatus() {
   try {
-    const res = await fetch("./api/gateway_status");
-    const data = await res.json();
+    const data = await apiFetch("./api/gateway_status");
     if (data.ok && data.services) {
       renderGatewayServices(data.services);
     }
@@ -7245,8 +7232,7 @@ function closeLogsModal() {
 
 async function loadLogs() {
   try {
-    const res = await fetch("./api/logs");
-    const data = await res.json();
+    const data = await apiFetch("./api/logs");
     if (data.logs) {
       rawLogsCache = data.logs;
       filterAndRenderLogs();
