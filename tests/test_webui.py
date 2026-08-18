@@ -70,6 +70,7 @@ class WebUiContractTests(unittest.TestCase):
         self.assertIn('raw_nodes = existing.get("nodes")', init_section)
         self.assertIn("singbox_manager.save_nodes(settings", init_section)
         self.assertIn('singbox_config["nodes"] = saved', init_section)
+        self.assertIn("config_store.save_versioned_config(auth_file, config", init_section)
         self.assertNotIn('config["singbox"] = saved', init_section)
 
     def test_ml_uninstall_removes_aimilivpn_owned_singbox(self):

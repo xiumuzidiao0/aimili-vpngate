@@ -1197,6 +1197,7 @@ auth_file = Path(sys.argv[2])
 sys.path.insert(0, str(install_dir))
 
 import singbox_manager
+import config_store
 
 try:
     config = json.loads(auth_file.read_text(encoding="utf-8")) if auth_file.exists() else {}
@@ -1244,10 +1245,7 @@ try:
     singbox_config["nodes"] = saved
     singbox_config.update(saved[0])
     config["singbox"] = singbox_config
-    temp_file = auth_file.with_suffix(".tmp")
-    temp_file.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
-    temp_file.chmod(0o600)
-    temp_file.replace(auth_file)
+    config_store.save_versioned_config(auth_file, config, create_backup=auth_file.exists())
     print(f"  -> sing-box 已配置为 SOCKS5 127.0.0.1:{proxy_port} -> VPNGate tun0 出口")
 except Exception as exc:
     print(f"  -> sing-box 代理链初始化失败: {exc}", file=sys.stderr)
