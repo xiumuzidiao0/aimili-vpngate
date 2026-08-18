@@ -63,6 +63,15 @@ class WebUiContractTests(unittest.TestCase):
         self.assertIn("$PKG_MGR install -y qrencode ||", installer)
         self.assertGreaterEqual(installer.count("其余功能不受影响"), 3)
 
+    def test_installer_update_preserves_all_singbox_nodes_and_combinations(self):
+        installer = Path(__file__).resolve().parents[1].joinpath("install.sh").read_text(encoding="utf-8")
+        init_section = installer.split("# Replace the upstream script's direct outbound", 1)[1].split("# 8. Start service", 1)[0]
+
+        self.assertIn('raw_nodes = existing.get("nodes")', init_section)
+        self.assertIn("singbox_manager.save_nodes(settings", init_section)
+        self.assertIn('singbox_config["nodes"] = saved', init_section)
+        self.assertNotIn('config["singbox"] = saved', init_section)
+
     def test_ml_uninstall_removes_aimilivpn_owned_singbox(self):
         installer = Path(__file__).resolve().parents[1].joinpath("install.sh").read_text(encoding="utf-8")
 

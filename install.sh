@@ -1203,22 +1203,47 @@ try:
     proxy_port = int(config.get("proxy_port", 7928))
     ui_port = int(config.get("port", 8787))
     existing = config.get("singbox") if isinstance(config.get("singbox"), dict) else {}
-    settings = singbox_manager.default_settings(proxy_port)
-    settings.update(existing)
-    settings["upstream_host"] = "127.0.0.1"
-    settings["upstream_port"] = proxy_port
+    raw_nodes = existing.get("nodes") if isinstance(existing.get("nodes"), list) else []
+    settings = []
+    if raw_nodes:
+        for raw_node in raw_nodes:
+            if not isinstance(raw_node, dict):
+                continue
+            node = singbox_manager.new_node(proxy_port)
+            node.update(raw_node)
+            settings.append(node)
+    if not settings:
+        # Legacy installations stored one node directly under singbox. Convert
+        # that shape once, while keeping all existing credentials and options.
+        node = singbox_manager.default_settings(proxy_port)
+        node.update(existing)
+        node["id"] = "default"
+        node["name"] = str(node.get("name") or "默认节点")
+        settings = [node]
 
-    if not settings.get("uuid"):
-        settings.update(singbox_manager.generate_values("uuid"))
-    if not settings.get("short_id"):
-        settings.update(singbox_manager.generate_values("short_id"))
-    if not settings.get("private_key") or not settings.get("public_key"):
-        settings.update(singbox_manager.generate_values("reality_keypair"))
+    for node in settings:
+        if not node.get("uuid"):
+            node.update(singbox_manager.generate_values("uuid"))
+        if node.get("protocol", "vless-reality") == "vless-reality":
+            if not node.get("short_id"):
+                node.update(singbox_manager.generate_values("short_id"))
+            if not node.get("private_key") or not node.get("public_key"):
+                node.update(singbox_manager.generate_values("reality_keypair"))
 
-    settings["enabled"] = True
-    settings["chain_enabled"] = True
-    saved = singbox_manager.save_config(settings, proxy_port, {ui_port, proxy_port})
-    config["singbox"] = saved
+    exit_ports = set()
+    for exit_config in config.get("vpn_exits", []):
+        if not isinstance(exit_config, dict):
+            continue
+        try:
+            exit_ports.add(int(exit_config.get("proxy_port")))
+        except (TypeError, ValueError):
+            continue
+    exit_ports.add(proxy_port)
+    saved = singbox_manager.save_nodes(settings, proxy_port, {ui_port, proxy_port}, exit_ports)
+    singbox_config = dict(existing)
+    singbox_config["nodes"] = saved
+    singbox_config.update(saved[0])
+    config["singbox"] = singbox_config
     temp_file = auth_file.with_suffix(".tmp")
     temp_file.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
     temp_file.chmod(0o600)
