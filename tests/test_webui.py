@@ -1,5 +1,6 @@
 import unittest
 import subprocess
+import re
 from pathlib import Path
 from unittest.mock import patch
 
@@ -47,6 +48,13 @@ class WebUiContractTests(unittest.TestCase):
         self.assertIn("await load({ refreshWorkspace: true });", html)
         self.assertIn("Promise.all(singboxNodes.map", html)
         self.assertIn("history.replaceState({ view: current }", html)
+
+    def test_vps_purchase_recommendation_is_not_rendered(self):
+        html = vpngate_manager.INDEX_HTML
+        visible_html = re.sub(r"<!--.*?-->", "", html, flags=re.DOTALL)
+        self.assertNotIn("vps_recommend_modal", visible_html)
+        self.assertNotIn("VPS购买推荐", visible_html)
+        self.assertNotIn("openVpsModal", visible_html)
 
     def test_mobile_node_list_uses_object_cards(self):
         html = vpngate_manager.INDEX_HTML

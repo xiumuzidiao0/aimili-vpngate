@@ -3474,140 +3474,6 @@ INDEX_HTML = r"""<!doctype html>
       min-width: 320px;
       margin-bottom: 0 !important;
     }
-    .vps-recommend-tab {
-      position: fixed;
-      right: 0;
-      top: 50%;
-      transform: translateY(-50%);
-      width: 38px;
-      background: var(--primary-gradient);
-      border: 1px solid var(--border-color-hover);
-      border-right: none;
-      border-radius: 8px 0 0 8px;
-      padding: 16px 6px;
-      color: white;
-      font-weight: 700;
-      font-size: 13px;
-      line-height: 1.4;
-      text-align: center;
-      cursor: pointer;
-      z-index: 999;
-      box-shadow: -4px 0 20px rgba(99, 102, 241, 0.3);
-      transition: all 0.3s ease;
-      writing-mode: vertical-rl;
-      text-orientation: mixed;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      gap: 4px;
-    }
-    .vps-recommend-tab:hover {
-      padding-right: 10px;
-      box-shadow: -4px 0 25px rgba(99, 102, 241, 0.5);
-    }
-
-    .vps-links {
-      display: grid;
-      grid-template-columns: repeat(2, 1fr);
-      gap: 16px;
-    }
-    
-    @media (max-width: 576px) {
-      .vps-links {
-        grid-template-columns: 1fr;
-      }
-    }
-    
-    .vps-item {
-      background: rgba(255, 255, 255, 0.02);
-      border: 1px solid rgba(255, 255, 255, 0.04);
-      border-radius: 12px;
-      padding: 20px;
-      display: flex;
-      flex-direction: column;
-      gap: 14px;
-      justify-content: space-between;
-      transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
-      box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15);
-    }
-    
-    .vps-item:hover {
-      background: rgba(255, 255, 255, 0.05);
-      border-color: rgba(99, 102, 241, 0.3);
-      transform: translateY(-2px);
-      box-shadow: 0 8px 30px rgba(99, 102, 241, 0.1);
-    }
-    
-    .vps-tag {
-      font-size: 11px;
-      font-weight: 700;
-      padding: 4px 10px;
-      border-radius: 6px;
-      width: fit-content;
-      text-transform: uppercase;
-      letter-spacing: 0.5px;
-    }
-    
-    .tag-normal {
-      background: rgba(99, 102, 241, 0.15);
-      color: #a5b4fc;
-      border: 1px solid rgba(99, 102, 241, 0.2);
-    }
-    
-    .tag-premium {
-      background: rgba(16, 185, 129, 0.15);
-      color: #6ee7b7;
-      border: 1px solid rgba(16, 185, 129, 0.2);
-    }
-    
-    .vps-desc {
-      font-size: 13px;
-      color: var(--text-secondary);
-      line-height: 1.6;
-      flex: 1;
-    }
-    
-    .vps-btn {
-      align-self: stretch;
-      text-decoration: none;
-      background: rgba(255, 255, 255, 0.05);
-      border: 1px solid rgba(255, 255, 255, 0.08);
-      color: var(--text-primary);
-      font-size: 12px;
-      font-weight: 600;
-      padding: 8px 16px;
-      border-radius: 8px;
-      transition: all 0.2s ease;
-      text-align: center;
-    }
-    
-    .vps-item:hover .vps-btn {
-      background: var(--primary-gradient);
-      border-color: transparent;
-      color: white;
-      box-shadow: 0 4px 10px rgba(99, 102, 241, 0.2);
-    }
-    
-    .vps-footer {
-      border-top: 1px dashed rgba(255, 255, 255, 0.08);
-      padding-top: 12px;
-      font-size: 13px;
-      color: var(--text-secondary);
-      text-align: center;
-    }
-    
-    .forum-link {
-      color: #818cf8;
-      font-weight: 700;
-      text-decoration: none;
-      transition: color 0.2s ease;
-    }
-    
-    .forum-link:hover {
-      color: #a5b4fc;
-      text-decoration: underline;
-    }
-
     .toolbar {
       background: var(--bg-surface);
       backdrop-filter: blur(12px);
@@ -4682,7 +4548,7 @@ INDEX_HTML = r"""<!doctype html>
 
   <div id="singbox_qr_modal" class="modal" role="dialog" aria-modal="true" aria-label="节点二维码"><div class="modal-content" style="max-width:380px;text-align:center;"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;"><h3 style="margin:0;font-size:18px;">节点二维码</h3><button type="button" onclick="closeSingboxQr()" class="connect-btn" title="关闭">关闭</button></div><div id="singbox_qr_name" style="font-size:13px;color:var(--text-secondary);margin-bottom:12px;"></div><div id="singbox_qr_image" class="qr-placeholder">二维码将在本机生成</div><button type="button" class="btn-primary" style="margin-top:16px;" onclick="copySingboxQrLink()">复制链接</button></div></div>
 
-  <!-- VPS 购买推荐 Modal -->
+  <!-- VPS 购买推荐已移除
   <div id="vps_recommend_modal" class="modal">
     <div class="modal-content" style="max-width: 640px;">
       <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px;">
@@ -4725,7 +4591,7 @@ INDEX_HTML = r"""<!doctype html>
     </div>
   </div>
 
-  <div class="vps-recommend-tab" onclick="openVpsModal()">VPS购买推荐</div>
+  <div class="vps-recommend-tab" onclick="openVpsModal()">VPS购买推荐</div> -->
 
   <!-- Gateway Modal (网关自检与代理测试) -->
   <div id="gateway_modal" class="modal">
@@ -7072,14 +6938,6 @@ async function loadSingboxClientInfo() {
     $("sb_client_uri").value = "";
     setSingboxMessage("error", err.message || "客户端连接地址不可用");
   }
-}
-
-function openVpsModal() {
-  $("vps_recommend_modal").style.display = "flex";
-}
-
-function closeVpsModal() {
-  $("vps_recommend_modal").style.display = "none";
 }
 
 async function logoutAdmin() {
