@@ -337,6 +337,46 @@ class VpnExitTests(unittest.TestCase):
         self.assertEqual(exit_config["node_id"], "")
         self.assertEqual(status["runtime"]["node_id"], "jp-auto")
 
+    def test_auto_exit_placeholder_is_normalized_before_runtime_selection(self):
+        ui_config = {
+            "proxy_port": 7928,
+            "vpn_exits": [{
+                "id": "default",
+                "node_id": "自动切换（按国家和 IP 类型）",
+                "country": "日本",
+                "ip_type": "hosting",
+                "proxy_port": 7928,
+                "enabled": True,
+            }],
+        }
+        with patch.object(vpngate_manager, "load_ui_config", return_value=ui_config):
+            exits = vpngate_manager.current_vpn_exits()
+
+        self.assertEqual(exits[0]["node_id"], "")
+        self.assertTrue(vpngate_manager.vpn_exit_uses_auto_selection(exits[0]))
+
+    def test_auto_switch_excludes_current_node_and_keeps_pool_selection(self):
+        exit_config = {
+            "id": "default", "enabled": True, "node_id": "", "country": "日本", "ip_type": "hosting",
+            "proxy_port": 7928,
+        }
+        nodes = [
+            {"id": "jp-current", "country": "日本", "ip_type": "hosting", "probe_status": "available", "latency_ms": 1, "active": True},
+            {"id": "jp-next", "country": "日本", "ip_type": "hosting", "probe_status": "available", "latency_ms": 10, "active": False},
+        ]
+        previous_active = vpngate_manager.active_openvpn_node_id
+        try:
+            vpngate_manager.active_openvpn_node_id = "jp-current"
+            with patch.object(vpngate_manager, "load_ui_config", return_value={"connection_enabled": True, "routing_mode": "auto"}), \
+                 patch.object(vpngate_manager, "current_vpn_exits", return_value=[exit_config]), \
+                 patch.object(vpngate_manager, "read_nodes", return_value=nodes), \
+                 patch.object(vpngate_manager, "connect_node") as connect:
+                vpngate_manager.auto_switch_node()
+
+            connect.assert_called_once_with("jp-next", persist_selection=False, exit_policy=exit_config)
+        finally:
+            vpngate_manager.active_openvpn_node_id = previous_active
+
     def test_normalize_exits_and_bind_singbox_nodes(self):
         ui_config = {"proxy_port": 7928, "port": 8787, "singbox": {"nodes": []}}
         raw_exits = [

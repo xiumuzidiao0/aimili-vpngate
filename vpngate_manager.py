@@ -664,7 +664,10 @@ def current_vpn_exits(ui_cfg: dict[str, Any] | None = None) -> list[dict[str, An
         exits.append({
             "id": exit_id,
             "name": str(raw.get("name") or exit_id).strip()[:64] or exit_id,
-            "node_id": str(raw.get("node_id") or "").strip(),
+            # The UI used to submit a human-readable auto-selection label.
+            # Normalize it here as well so runtime failover never treats it as
+            # a fixed node after a restart or an older configuration update.
+            "node_id": normalize_vpn_exit_node_id(raw.get("node_id")),
             "country": str(raw.get("country") or "").strip(),
             "ip_type": str(raw.get("ip_type") or "all").strip().lower(),
             "proxy_port": port,
@@ -1055,7 +1058,10 @@ def start_vpn_exit(exit_id: str) -> dict[str, Any]:
         raise ValueError("该 VPN 出口已禁用")
     automatic = vpn_exit_uses_auto_selection(exit_config)
     candidates = vpn_exit_candidate_nodes(exit_config)
-    attempts = candidates[:3] if automatic else candidates
+    # Automatic mode is a health-based pool, not a one-time choice. Try all
+    # currently healthy matching candidates (bounded to avoid a long outage
+    # blocking the service when the remote list is unusually large).
+    attempts = candidates[:10] if automatic else candidates
     if exit_id == "default":
         errors: list[str] = []
         for node in attempts:
@@ -2413,10 +2419,12 @@ def auto_switch_node(attempt: int = 0) -> None:
     # Find the next best available node
     with lock:
         nodes = read_nodes()
+        current_id = str(active_openvpn_node_id or "")
         candidates = [
-            n for n in nodes 
-            if n.get("probe_status") == "available" 
+            n for n in nodes
+            if n.get("probe_status") == "available"
             and not n.get("active")
+            and str(n.get("id") or "") != current_id
         ]
         if exit_auto and default_exit:
             candidates = filter_vpn_exit_candidates(candidates, default_exit)
