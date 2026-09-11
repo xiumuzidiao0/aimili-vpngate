@@ -39,6 +39,15 @@ AimiliVPN 使用 Python 标准库管理 VPNGate 节点，提供节点获取与�
 | Docker 镜像 | `linux/amd64`、`linux/386`、`linux/arm64`、`linux/arm/v7` |
 | 更新通道 | GitHub `main` 正式分支 / 最新正式 Release |
 
+> [!TIP]
+> 🚀 **强力推荐使用全新 Go 高性能重构版 (v2.5.0)**：[aimili-vpngate-go](https://github.com/xiumuzidiao0/aimili-vpngate-go)
+> - **轻量极速**：单静态可执行二进制文件，内存占用由 100MB+ 骤降至 **< 15MB**（CPU < 1%）；
+> - **强隔离架构**：`tun0` 独占主出口，多出口 `tun1..tun63` 隔离策略路由，零主机 SSH 泄露风险；
+> - **动态冗余与解锁筛选**：自适应隧道组支持按 **AI 模型 (ChatGPT/Claude)** 与 **流媒体 (Netflix/Google)** 解锁能力自动筛选与保活；
+> - **客户端生态对接**：支持一键导出 **Clash Meta / Mihomo YAML 订阅** 并一键免密拉取；
+> - **边缘抗封锁集成**：深度内置 sing-box 链式代理与 7×24 小时后台自愈守护 (Watchdog)；
+> - **Go 重构版一键安装**：`curl -sSL https://raw.githubusercontent.com/xiumuzidiao0/aimili-vpngate-go/main/install.sh | bash`
+
 > [!IMPORTANT]
 > **网络可用性提示：** 不同地区、数据中心和网络服务商可能限制 DNS、VPNGate API、GitHub 镜像或 VPN 协议。镜像与本地缓存只能提高节点列表的可用性，不能保证所有机型都能建立连接。部署前请确认所在地法律和 VPS 服务商条款允许使用 VPN/TUN。
 
