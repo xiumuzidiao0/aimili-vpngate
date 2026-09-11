@@ -1144,6 +1144,18 @@ elif command -v rc-service >/dev/null 2>&1; then
     rc-service aimilivpn restart || true
 fi
 
+# Configure firewall for web UI port
+if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -qw "active"; then
+    ufw allow "${UI_PORT}/tcp" >/dev/null 2>&1 || true
+fi
+if command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active firewalld >/dev/null 2>&1; then
+    firewall-cmd --zone=public --add-port="${UI_PORT}/tcp" --permanent >/dev/null 2>&1 || true
+    firewall-cmd --reload >/dev/null 2>&1 || true
+fi
+if command -v iptables >/dev/null 2>&1; then
+    iptables -C INPUT -p tcp --dport "${UI_PORT}" -j ACCEPT 2>/dev/null || iptables -I INPUT -p tcp --dport "${UI_PORT}" -j ACCEPT 2>/dev/null || true
+fi
+
 # Wait and poll for node loading and active connection
 echo -e "\n正在等待 AimiliVPN 首次获取节点并建立加密通道 (此过程可能需要 5-90 秒)..."
 ACTIVE_ID=""
@@ -1217,5 +1229,9 @@ echo -e "  * 快速状态指令:   ${YELLOW}ml status${PLAIN}  或  ${YELLOW}ml$
 echo -e "  * 查看实时日志:   ${YELLOW}ml logs${PLAIN}"
 echo -e "  * 停止服务:       ${YELLOW}ml stop${PLAIN}"
 echo -e "  * 重启服务:       ${YELLOW}ml restart${PLAIN}"
+echo -e " --------------------------------------------------------"
+echo -e "  * ${YELLOW}⚠️ 无法访问排查${PLAIN}:"
+echo -e "    1. 请确认云厂商安全组 (阿里云/腾讯云/AWS/华为云) 已放行 ${BLUE}TCP ${UI_PORT}${PLAIN} 入站端口"
+echo -e "    2. 访问必须带有安全路径后缀: ${BLUE}/${SECRET_PATH}/${PLAIN} (直接访问主站将隐蔽返回 404)"
 echo -e "=========================================================="
 echo
